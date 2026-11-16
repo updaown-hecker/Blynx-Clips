@@ -1,0 +1,10 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.32,<1
+httpx>=0.27,<1
+websockets>=14,<17
+streamlink>=7,<9
+grpcio>=1.70,<2
+protobuf>=5,<8
+keyring>=25,<27
+psutil>=6,<8
+

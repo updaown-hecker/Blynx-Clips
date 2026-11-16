@@ -1,0 +1,11 @@
+{
+  "$schema":"https://schema.tauri.app/config/2",
+  "productName":"Blynx Clips Native",
+  "identifier":"vip.blynx.clips",
+  "version":"0.2.0",
+  "build":{"beforeBuildCommand":"npm run build","frontendDist":"../dist"},
+  "app":{"windows":[],"withGlobalTauri":false,"security":{"capabilities":[]}},
+  "bundle":{"active":true,"targets":["deb"],"icon":["icons/128x128.png","icons/icon.png","icons/icon.ico"],
+    "linux":{"deb":{"depends":["blynx-clips","gstreamer1.0-libav","gstreamer1.0-plugins-good","gstreamer1.0-plugins-bad"]}}}
+}
+

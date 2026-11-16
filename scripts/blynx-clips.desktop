@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Blynx Clips
+Comment=Detect livestream highlights from live chat
+Exec=blynx-clips
+Icon=blynx-clips
+Terminal=false
+Categories=AudioVideo;Video;
+StartupWMClass=BlynxClips
+StartupNotify=true
+

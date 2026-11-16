@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app_root="$(cd -- "$(dirname -- "$(realpath "$0")")/.." && pwd)"
+if [[ ! -f "$app_root/requirements.txt" ]]; then app_root=/opt/blynx-clips; fi
+data="${XDG_DATA_HOME:-$HOME/.local/share}/blynx-clips"
+config="$HOME/.config/blynx-clips"
+venv="$data/runtime"
+url=http://127.0.0.1:17865
+umask 077
+mkdir -p "$data" "$config"
+if [[ ! -e "$config/integrations.env" ]]; then
+    cp "$app_root/integrations.example.env" "$config/integrations.env"
+fi
+exec 9>"$data/install.lock"
+flock 9
+digest="$(sha256sum "$app_root/requirements.txt" | cut -d' ' -f1)"
+if [[ ! -x "$venv/bin/python" ]] || [[ "$digest" != "$(cat "$venv/.requirements-sha" 2>/dev/null || true)" ]]; then
+    python3 -m venv "$venv"
+    env -u PYTHONPATH "$venv/bin/python" -m pip install --disable-pip-version-check -r "$app_root/requirements.txt" >>"$data/setup.log" 2>&1 || {
+        printf 'Blynx Clips dependency installation failed. See %s/setup.log\n' "$data" >&2
+        command -v notify-send >/dev/null && notify-send 'Blynx Clips setup failed' "$data/setup.log" || true
+        exit 1
+    }
+    printf '%s\n' "$digest" >"$venv/.requirements-sha"
+fi
+flock -u 9
+exec 9>&-
+case "${1:-}" in
+    --serve)
+        export BLYNX_DATA_DIR="$data" BLYNX_FRONTEND="$app_root/frontend/dist"
+        export PATH="$venv/bin:$PATH" PYTHONPATH="$app_root/backend"
+        exec "$venv/bin/python" -m blynx
+        ;;
+    --enable-autostart)
+        exec systemctl --user enable --now blynx-clips.service
+        ;;
+    --disable-autostart)
+        exec systemctl --user disable blynx-clips.service
+        ;;
+esac
+
+if [[ ! -f "$app_root/frontend/dist/index.html" ]]; then
+    printf 'Frontend assets unavailable. Build frontend/ first.\n' >&2
+    exit 1
+fi
+expected_version=0.2.0
+old_health="$(curl --max-time 1 -fsS "$url/api/health" 2>/dev/null || true)"
+if [[ "$old_health" == *'"app":"blynx-clips"'* && "$old_health" != *'"version":"'$expected_version'"'* ]]; then
+    systemctl --user restart blynx-clips.service
+else
+    systemctl --user start blynx-clips.service
+fi
+for _ in {1..120}; do
+    if curl --max-time 1 -fsS "$url/api/health" | grep -Fq '"version":"'"$expected_version"'"'; then
+        if [[ "${1:-}" == "--start-service" ]]; then exit 0; fi
+        if [[ "${1:-}" != "--web" ]] && [[ -x /usr/bin/blynx-clips-native ]]; then
+            exec /usr/bin/blynx-clips-native
+        fi
+        for browser in google-chrome-stable google-chrome chromium chromium-browser brave-browser; do
+            if command -v "$browser" >/dev/null; then
+                exec "$browser" --app="$url" --class=BlynxClips
+            fi
+        done
+        exec xdg-open "$url"
+    fi
+    sleep .25
+done
+printf 'Blynx Clips did not respond. Run journalctl --user -u blynx-clips.service -n 60.\n' >&2
+exit 1
+

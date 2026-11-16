@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <link rel="stylesheet" href="popup.css">
+  <title>Blynx Clips</title>
+</head>
+<body>
+  <header><span class="brand" aria-hidden="true">▶</span><h1>Blynx Clips</h1></header>
+  <p id="service" role="status">Connecting…</p>
+  <section id="stream" hidden>
+    <strong id="current"></strong>
+    <small id="recording"></small>
+  </section>
+  <form id="pair" hidden>
+    <label for="code">Pairing code</label>
+    <input id="code" name="code" autocomplete="off" placeholder="ABCDE-FGHIJ" maxlength="11" required>
+    <button class="primary">Pair extension</button>
+  </form>
+  <div id="actions" hidden>
+    <button class="primary" id="add">Monitor this stream</button>
+    <button class="primary" id="clip">Save up to 30 seconds</button>
+    <button id="capture" hidden>Record this tab</button>
+    <a id="highlights" href="http://127.0.0.1:17865/?view=highlights" target="_blank" rel="noreferrer" hidden>View highlights ↗</a>
+  </div>
+  <footer>
+    <a href="http://127.0.0.1:17865/" target="_blank" rel="noreferrer">Open dashboard ↗</a>
+    <button class="quiet" id="forget" hidden>Forget pairing</button>
+  </footer>
+  <script src="popup.js"></script>
+</body>
+</html>

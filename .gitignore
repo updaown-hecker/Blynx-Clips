@@ -1,0 +1,11 @@
+.env
+*.sqlite*
+__pycache__/
+.pytest_cache/
+.venv/
+frontend/node_modules/
+frontend/dist/
+frontend/src-tauri/target/
+release/
+*.partial.mp4
+

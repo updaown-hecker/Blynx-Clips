@@ -1,0 +1,20 @@
+[Unit]
+Description=Blynx Clips local monitoring and recording
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/opt/blynx-clips/scripts/blynx-clips --serve
+EnvironmentFile=-%h/.config/blynx-clips/integrations.env
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=35
+KillMode=mixed
+KillSignal=SIGINT
+UMask=0077
+NoNewPrivileges=yes
+WorkingDirectory=%h
+
+[Install]
+WantedBy=default.target
+

@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Blynx Clips Companion",
+  "description": "Save streamers, clip buffered footage, and record the active stream tab in Blynx Clips.",
+  "version": "0.2.0",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "tabCapture",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:17865/*"
+  ],
+  "action": {
+    "default_title": "Blynx Clips",
+    "default_popup": "popup.html"
+  },
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "worker.js"
+  }
+}
