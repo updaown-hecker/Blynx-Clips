@@ -13,25 +13,34 @@ import httpx
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 from websockets.asyncio.client import connect
 
+from .server import credential_path, read_credential, write_credential
+
 
 class PlatformError(RuntimeError):
     pass
 
 
 async def read_secret(service: str, account: str) -> str:
-    import keyring
     try:
+        if path := credential_path(service, account):
+            return await asyncio.to_thread(read_credential, path)
+        import keyring
         return await asyncio.to_thread(keyring.get_password, service, account) or ""
     except Exception:
         return ""
 
 
 async def write_secret(service: str, account: str, value: str) -> None:
-    import keyring
     try:
-        await asyncio.to_thread(keyring.set_password, service, account, value)
+        if path := credential_path(service, account):
+            await asyncio.to_thread(write_credential, path, value)
+        else:
+            import keyring
+            await asyncio.to_thread(keyring.set_password, service, account, value)
     except Exception:
-        raise PlatformError("Credential storage unavailable. Unlock KDE Wallet or start a Secret Service provider.") from None
+        hint = ("Check the permissions of the server credential directory." if credential_path(service, account)
+                else "Unlock KDE Wallet or start a Secret Service provider.")
+        raise PlatformError("Credential storage unavailable. " + hint) from None
 
 
 class QuotaError(PlatformError):

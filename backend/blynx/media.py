@@ -89,7 +89,8 @@ class Recorder:
         try:
             self.producer = await asyncio.create_subprocess_exec(
                 "streamlink", "--stdout", "--loglevel", "error", "--stream-segment-timeout", "15",
-                self.url, self.quality, stdout=write_fd, stderr=self.log)
+                self.url, f"{self.quality},best" if self.quality.endswith("p") else self.quality,
+                stdout=write_fd, stderr=self.log)
             self.consumer = await asyncio.create_subprocess_exec(
                 *base, "-i", "pipe:0", *output, cwd=self.directory, stdin=read_fd,
                 stderr=self.log, stdout=asyncio.subprocess.DEVNULL)

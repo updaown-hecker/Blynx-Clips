@@ -79,7 +79,12 @@ class Store:
               day TEXT NOT NULL, bucket TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(day,bucket)
             );
         """)
-        self.settings = Settings.model_validate(self.config("settings", {}))
+        if "score_version" not in {row["name"] for row in self.db.execute("PRAGMA table_info(clip)")}:
+            self.db.execute("ALTER TABLE clip ADD COLUMN score_version INTEGER NOT NULL DEFAULT 1")
+        server_defaults = {"slots": 1, "notification": False, "quality": "720p"} if (
+            os.getenv("BLYNX_SERVER_MODE") == "1"
+        ) else {}
+        self.settings = Settings.model_validate(self.config("settings", server_defaults))
         self.started = bool(self.config("running", True))
         self.db.execute("UPDATE session SET outcome='interrupted' WHERE outcome='active'")
         self.db.commit()

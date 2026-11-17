@@ -1,6 +1,6 @@
 from collections import Counter, deque
 from dataclasses import dataclass
-from math import sqrt
+from math import ceil, sqrt
 from statistics import median
 
 
@@ -69,6 +69,10 @@ class Detector:
         self.config = config
         self.history: deque[float] = deque(maxlen=config.baseline)
         self.recent: deque[Bucket] = deque(maxlen=5)
+        # Non-overlapping windows give the dashboard an observed frequency.
+        self.comparisons: deque[int] = deque(maxlen=max(60, config.baseline // 5))
+        self.last_tick: float | None = None
+        self.last_comparison: float | None = None
         self.starts: deque[float] = deque()
         self.active: Event | None = None
         self.rising: float | None = None
@@ -95,9 +99,12 @@ class Detector:
 
     def tick(self, when: float, bucket: Bucket | None) -> tuple[str, Event] | None:
         config = self.config
-        if bucket is None:
+        if bucket is None or (self.last_tick is not None and when - self.last_tick > 1.5):
             self.recent.clear()
             self.recovery = self.rising = None
+            self.metrics = {}
+        self.last_tick = when
+        if bucket is None:
             if self.active and when - self.active.onset >= config.max_active:
                 return self._end(when, "chat coverage lost")
             return None
@@ -113,12 +120,29 @@ class Detector:
         mad = median(abs(sample - baseline) for sample in self.history) if self.history else 0
         spread = max(sqrt(max(1, baseline)), 1.4826 * mad)
         provisional = len(self.history) < config.warmup
-        score = max(0.0, (volume - baseline) / spread)
-        threshold = max(config.min_messages, baseline * config.rise * (1.5 if provisional else 1),
-                        baseline + spread * config.deviations * (1.6 if provisional else 1))
-        high = volume >= threshold and len(authors) >= config.min_users
-        self.metrics = {"count5": volume, "baseline": baseline, "score": round(score, 2),
-                        "provisional": provisional, "unique5": len(authors)}
+        excess = max(0.0, volume - baseline)
+        # A stable, busy chat can have an unusual spike without doubling its traffic.
+        lift_target = (config.rise - 1) / (1 + sqrt(baseline / 100))
+        deviation_target = config.deviations * (1.6 if provisional else 1)
+        lift_target *= 1.5 if provisional else 1
+        threshold = max(config.min_messages, baseline * (1 + lift_target),
+                        baseline + spread * deviation_target)
+        audience = max(config.min_users, min(12, ceil(sqrt(baseline) / 4)))
+        high = volume >= threshold and len(authors) >= audience
+        lift = excess / max(config.min_messages, baseline)
+        deviation = excess / spread
+        breadth = len(authors) / (len(authors) + audience)
+        strength = (0.55 * deviation / (deviation + deviation_target)
+                    + 0.30 * lift / (lift + lift_target) + 0.15 * breadth)
+        score = round(100 * strength * min(1, len(authors) / audience), 1) if excess else 0.0
+
+        self.metrics = {"count5": volume, "baseline": baseline, "score": score,
+                        "provisional": provisional, "unique5": len(authors),
+                        "comparedWindows": len(self.comparisons),
+                        "similarWindows": sum(sample >= volume for sample in self.comparisons)}
+        if self.last_comparison is None or when - self.last_comparison >= 5:
+            self.comparisons.append(volume)
+            self.last_comparison = when
 
         if self.active is not None:
             self.active.peak = max(self.active.peak, score)

@@ -4,11 +4,12 @@ export type Channel = {
   enabled: number; priority: number; offset: number; preset: string; samples: Sample[]
   discovery?: string; recording?: string; chat?: string; error?: string; health?: number; bitrate?: number
   mps?: number; raw5?: number; raw15?: number; raw30?: number; score?: number; baseline?: number; unique5?: number
+  comparedWindows?: number; similarWindows?: number
   ingestLag?: number | null; acceleration?: number; repeats?: number; emotes?: number; provisional?: boolean
   live?: {broadcast?: string; title: string; thumbnail?: string; viewers?: number | null}
 }
 export type Clip = {
-  id: string; name: string; channel: string; platform: string; source: string; score: number; onset: number
+  id: string; name: string; channel: string; platform: string; source: string; score: number; scoreVersion?: number; onset: number
   status: "ready" | "capturing" | "processing" | "failed"; review: string; favorite: number
   partial: number; duration: number; thumbnail: number; simulated: number; reason: string; offset: number
 }
@@ -27,7 +28,7 @@ export type State = {
 export type Analytics = {
   stats: Record<"events"|"clips"|"failed"|"score"|"bytes"|"duration"|"hours", number|null>
   groups: {channel: string; clips: number; bytes: number}[]
-  peaks: Pick<Clip,"id"|"name"|"channel"|"onset"|"score"|"status">[]
+  peaks: Pick<Clip,"id"|"name"|"channel"|"onset"|"score"|"scoreVersion"|"status">[]
 }
 export async function api<T>(path: string, method = "GET", value?: unknown): Promise<T> {
   const response = await fetch("/api/" + path, {method, headers: {"Content-Type":"application/json","X-Blynx-Local":"1"},

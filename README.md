@@ -13,6 +13,33 @@ Open **Blynx Clips** from the application menu. The packaged launcher opens a st
 
 In the dashboard, click **Run simulation**. It takes about a minute. The generated test video, audio, and chat are labeled Simulation. Open **Highlights** and play the generated MP4. Sources and credentials are required for live use.
 
+## Linux home server
+
+Run the Docker Compose service on your CasaOS server from an SSH shell. It runs without a desktop session, starts again when Docker starts, and keeps its library, settings and account authorizations in the `blynx-data` volume.
+
+Clone this private repository using a GitHub account authorized to access it, or extract its source ZIP on the server. In the project directory:
+
+```bash
+cp server.env.example server.env
+nano server.env
+docker compose --env-file server.env up -d --build
+docker compose --env-file server.env logs -f
+```
+
+Set `BLYNX_FOLLOW_URL` to the streamer's channel page, such as `https://www.twitch.tv/theirname` or `https://www.youtube.com/@theirchannel`. Use their channel page to pick up future broadcasts. A configured URL locks automatic monitoring to that channel. The service retries registration while it waits for platform credentials. Offline channels use no recorder, and capture starts when the platform reports a live broadcast. Twitch status is checked about every 45 seconds. YouTube channel checks share the API search budget and can take longer.
+
+From your desktop, forward the server dashboard to your own device:
+
+```bash
+ssh -N -L 17866:127.0.0.1:17866 YOUR_USER@YOUR_SERVER_IP
+```
+
+While SSH is open, visit [the server dashboard](http://127.0.0.1:17866). In **Settings → Platform connections**, set up Twitch or YouTube once. Twitch accepts the Client ID you already registered. Use **Sign in with Twitch** to authorize this server separately. For YouTube, paste your API key. The service keeps running after you close the browser and SSH tunnel. Look for ready clips in **Highlights** and download them from the dashboard.
+
+The Linux container shares the host network and the app binds only to port 17866 on loopback. Keep the dashboard behind SSH. Its local session design assumes access is limited to trusted users on the host. The server presets use one recording slot and prefer 720p, falling back to the best available resolution. Headless credentials are stored in permission-restricted files on the server volume. Treat volume backups as sensitive. Use `docker compose --env-file server.env down` to stop the service and keep your library.
+
+Automatic storage reclamation is optional. Set `BLYNX_SERVER_PRUNE=1` in `server.env` before starting the service to remove the oldest unreviewed, non-favorite automatic clips when near the configured storage limit. Manual, reviewed, favorite and exported clips are kept. If protected clips fill the budget, recording pauses until you free space or raise the limit.
+
 ## Platform setup
 
 Open **Settings → Platform connections**. The app checks pasted credentials with the provider before saving them in KDE Wallet or your system keyring.
@@ -29,7 +56,9 @@ Official references: [Twitch EventSub](https://dev.twitch.tv/docs/eventsub/handl
 
 ## Clip timing and scores
 
-The detector caps each author's contribution at three messages per second for scoring. It compares the previous five seconds of activity against a rolling median and median absolute deviation. The score is the amount above that median divided by the greater of scaled MAD and the square root of the baseline, floored at one. For example, 900 effective messages over five seconds against a stable median of 200 yield a score close to 49.5. This is an unbounded activity score. Distinct participation, onset, recovery, hysteresis, cooldown, and hourly caps govern whether the engine saves a clip.
+The detector scores each five-second window from 0 to 100 based on volume compared with the channel's median, recent variability, relative increase, and unique participation. Each author's contribution is capped at three messages per second. A stable, high-volume chat can trigger on a smaller relative jump when the change is still statistically unusual. Minimum participation, confirmation time, recovery, cooldown and hourly limits continue to govern clip capture. Legacy scores stay labeled with their original scale.
+
+**Similar or busier windows** in Live Monitoring shows how many recent, non-overlapping five-second windows had at least this much effective chat activity. It shows the count after 12 comparable windows have been collected in the current session. This is observed chat frequency, so it cannot estimate the chance that a moment will go viral.
 
 Video capture keeps a rolling segment buffer using stream copies. The first completed segment anchors media time to a local clock. Platform timestamps place incoming chat into one-second buckets with a short delay allowance for late delivery. The per-channel offset shifts the entire requested clip. Negative values move earlier in the buffer. Use a short test broadcast to calibrate against a visible event. Chat reactions, acquisition latency, and source keyframes affect alignment. Reconnect or missing video can produce a labeled partial clip. If neither track is usable, the event is labeled Failed with the reason.
 

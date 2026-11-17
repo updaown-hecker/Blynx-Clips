@@ -4,6 +4,7 @@ import hmac
 import logging
 import os
 import secrets
+import signal
 import time
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
@@ -41,6 +42,16 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     app.state.pair_code = ("", 0.0)
     supervisor = asyncio.create_task(engine.supervisor())
+    app.state.supervisor = supervisor
+
+    def supervisor_finished(task: asyncio.Task) -> None:
+        if not engine.stop and not task.cancelled():
+            error = task.exception()
+            logger.error("Monitoring stopped unexpectedly", exc_info=error)
+            if os.getenv("BLYNX_SERVER_MODE") == "1":
+                os.kill(os.getpid(), signal.SIGTERM)
+
+    supervisor.add_done_callback(supervisor_finished)
     try:
         yield
     finally:
@@ -129,6 +140,8 @@ async def validation_error(request: Request, exc: RequestValidationError):
 
 @app.get("/api/health")
 async def health():
+    if app.state.supervisor.done():
+        raise HTTPException(503, "Monitoring service stopped")
     return {"app": "blynx-clips", "version": "0.2.0"}
 
 
@@ -537,7 +550,7 @@ async def analytics(days: int = 7, platform: str = "", channel: str = "", simula
     filters = " AND (?='' OR platform=?) AND (?='' OR channel=?) AND simulated=?"
     args = (platform, platform, channel, channel, simulated)
     stats = store.item("SELECT count(CASE WHEN score>0 THEN 1 END) AS events, count(CASE WHEN status='ready' THEN 1 END) AS clips, "
-                       "count(CASE WHEN status='failed' THEN 1 END) AS failed, avg(CASE WHEN score>0 THEN score END) AS score, "
+                       "count(CASE WHEN status='failed' THEN 1 END) AS failed, avg(CASE WHEN score_version=2 AND score>0 THEN score END) AS score, "
                        "sum(bytes) AS bytes, avg(CASE WHEN status='ready' THEN duration END) AS duration "
                        "FROM clip WHERE onset>?" + filters, (start, *args))
     sessions = store.item("SELECT sum(max(0,ended-max(started,?)))/3600.0 AS hours "
@@ -545,7 +558,7 @@ async def analytics(days: int = 7, platform: str = "", channel: str = "", simula
     groups = store.all("SELECT channel, count(*) AS clips, sum(bytes) AS bytes "
                        "FROM clip WHERE status='ready' AND onset>?" + filters +
                        " GROUP BY channel ORDER BY clips DESC", (start, *args))
-    peaks = store.all("SELECT id, channel, name, onset, score, status FROM clip WHERE score>0 AND onset>?" +
-                      filters + " ORDER BY score DESC LIMIT 20", (start, *args))
+    peaks = store.all("SELECT id, channel, name, onset, score, score_version AS scoreVersion, status FROM clip WHERE score>0 AND onset>?" +
+                      filters + " ORDER BY score_version DESC, score DESC LIMIT 20", (start, *args))
     return {"stats": stats | sessions, "groups": groups, "peaks": peaks}
 

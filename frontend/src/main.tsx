@@ -25,6 +25,10 @@ const date = (timestamp: number) => new Date(timestamp * 1000).toLocaleString([]
 const size = (bytes: number) => bytes >= 1e9 ? number.format(bytes / 1e9) + " GB" : number.format(bytes / 1e6) + " MB"
 const isActive = (channel: Channel) => ["Recording","Buffering","Starting recorder"].includes(channel.recording ?? "")
 
+function scoreLabel(score:number, version?:number) {
+  return version === 2 ? number.format(score) + "/100" : number.format(score) + " (legacy)"
+}
+
 function Platform({name, width=15}: {name:string; width?:number}) {
   return name === "Twitch" ? <Twitch size={width} className="twitch"/> : name === "YouTube" ?
     <Youtube size={width} className="youtube"/> : <FlaskConical size={width} className="accent"/>
@@ -77,7 +81,7 @@ function StreamCard({channel, clips, onEvent, task, detailed=false}: {channel:Ch
       </div>
       <div className="stream-stats"><div><small>Chat / 5s</small><b>{channel.raw5 ?? "—"}</b></div>
         <div><small>Baseline</small><b>{channel.baseline == null ? "—" : number.format(channel.baseline)}</b></div>
-        <div><small>Spike score</small><b>{channel.score == null ? "—" : number.format(channel.score)}</b></div>
+        <div><small>Spike score</small><b>{channel.score == null ? "—" : number.format(channel.score) + "/100"}</b></div>
         <div><small>Clips</small><b>{clips.filter(c=>c.channel===channel.name && c.status==="ready").length}</b></div></div>
       <Graph channel={channel} onEvent={onEvent}/>
       <div className="stream-bottom"><Pill tone={isActive(channel) ? "green" : "muted"}>{channel.recording ?? (live ? "Queued" : "Standby")}</Pill>
@@ -89,6 +93,9 @@ function StreamCard({channel, clips, onEvent, task, detailed=false}: {channel:Ch
       </div>
       {detailed && <div className="detailed">
         <div>1s / 15s / 30s <b>{channel.mps ?? "—"} / {channel.raw15 ?? "—"} / {channel.raw30 ?? "—"}</b></div>
+        <div title="Earlier five-second windows with at least this much effective chat activity">Similar or busier windows
+          <b>{(channel.comparedWindows ?? 0) < 12 ? "Collecting history" :
+            channel.similarWindows + " of " + channel.comparedWindows}</b></div>
         <div>Unique chatters (5s) <b>{channel.unique5 ?? "—"}</b></div><div>Acceleration <b>{channel.acceleration ?? "—"}</b></div>
         <div>Repeats / emotes (1s) <b>{channel.repeats ?? "—"} / {channel.emotes ?? "—"}</b></div>
         <div>Recording bitrate <b>{channel.bitrate ? number.format(channel.bitrate/1e6)+" Mbps" : "—"}</b></div>
@@ -125,7 +132,7 @@ function ClipLibrary({clips, open}: {clips:Clip[]; open:(id:string)=>void}) {
   const [list,setList]=useState(false)
   const [favorite,setFavorite]=useState(false)
   const filtered=clips.filter(c=>(!platform||c.platform===platform)&&(!favorite||c.favorite)&&(!duration|| (duration==="short"?c.duration<=60:c.duration>60))&&
-    (c.name+" "+c.channel).toLowerCase().includes(query.toLowerCase())).sort((a,b)=>sort==="score"?b.score-a.score:b.onset-a.onset)
+    (c.name+" "+c.channel).toLowerCase().includes(query.toLowerCase())).sort((a,b)=>sort==="score"?(b.scoreVersion??1)-(a.scoreVersion??1)||b.score-a.score:b.onset-a.onset)
   return <><div className="toolbar">
     <label className="search"><Search size={15}/><input value={query} placeholder="Search highlights" onChange={e=>setQuery(e.target.value)}/></label>
     <select aria-label="Platform" value={platform} onChange={e=>setPlatform(e.target.value)}><option value="">All platforms</option>
@@ -140,7 +147,7 @@ function ClipLibrary({clips, open}: {clips:Clip[]; open:(id:string)=>void}) {
     <div className="clip-cover">{Boolean(c.thumbnail) ? <img src={"/media/"+c.id+"/thumbnail"} alt=""/> : <Clapperboard size={27}/>}
       {c.duration>0&&<span>{number.format(c.duration)}s</span>}</div>
     <div className="clip-body"><strong title={c.name}>{c.name}</strong><span><Platform name={c.platform}/>{c.channel} · {time(c.onset)}</span>
-      <span className="clip-score"><Zap size={12}/>{c.score>0?number.format(c.score):"Manual"} · {c.status==="ready"?c.review:c.status}{c.partial?" · partial":""}</span></div>
+      <span className="clip-score"><Zap size={12}/>{c.score>0?scoreLabel(c.score,c.scoreVersion):"Manual"} · {c.status==="ready"?c.review:c.status}{c.partial?" · partial":""}</span></div>
   </button>)}</div> : <Empty icon={<Clapperboard/>} title={clips.length?"No highlights match these filters":"Your highlights will appear here"}>
     <p>{clips.length?"Change your search or filters to see more.":"Clips appear as soon as FFmpeg finishes processing them."}</p></Empty>}</>
 }
@@ -156,7 +163,7 @@ function ClipDetail({clip, close, task}: {clip:Clip;close:()=>void;task:Task}) {
   return <Dialog title={clip.name} close={close} wide>
     {clip.status==="ready" ? <video className="video" controls playsInline src={"/media/"+clip.id+"/video"}/> :
       <div className="notice">{clip.status==="failed"?clip.reason:"Clip is being created. This view will update automatically."}</div>}
-    <div className="clip-info"><Platform name={clip.platform}/>{clip.channel} · {date(clip.onset)} · {clip.score>0?"score "+number.format(clip.score):"manual capture"}
+    <div className="clip-info"><Platform name={clip.platform}/>{clip.channel} · {date(clip.onset)} · {clip.score>0?"score "+scoreLabel(clip.score,clip.scoreVersion):"manual capture"}
       {clip.partial?" · partial footage":""}</div>
     {clip.reason && <p className="secondary">{clip.reason} · timing offset {clip.offset}s</p>}
     <div className="toolbar"><input aria-label="Highlight name" value={name} onChange={e=>setName(e.target.value)}/>
@@ -215,7 +222,7 @@ function AddChannel({close, refresh, setup}: {close:()=>void;refresh:()=>void;se
 const fields: [keyof Settings,string,string][] = [
   ["slots","Concurrent recordings","1–3"],["buffer","Buffer seconds","90–600"],["pre","Pre-roll seconds","0–60"],
   ["post","Post-roll seconds","2–90"],["maximum","Maximum clip seconds","15–300"],["disk_gb","Storage limit (GB)","Pauses recording when reached"],
-  ["rise","Relative spike multiplier","Manual preset"],["deviations","Minimum robust score","Manual preset"],["baseline","Baseline samples","30–900"],
+  ["rise","Relative spike sensitivity","Manual preset"],["deviations","Minimum statistical deviation","Manual preset"],["baseline","Baseline samples","30–900"],
   ["onset","Spike onset seconds","1–12"],["cooldown","Cooldown seconds","6–600"],["min_users","Minimum distinct chatters","2–500"],
   ["per_hour","Clips per hour / stream","1–60"],["youtube_search_budget","YouTube searches / day","Shared across saved channels"],
   ["youtube_units","Other YouTube units / day","Discovery and live chat"],
@@ -288,7 +295,7 @@ function SettingsView({state,task}: {state:State;task:Task}) {
   const change=<K extends keyof Settings>(name:K,v:Settings[K])=>set(old=>({...old,[name]:v}))
   return <div className="settings-layout">
     <Connections integration={state.integration} task={task}/>
-    <section className="panel"><h2>Recording and detection</h2><p className="secondary">Settings apply when a recording starts. The spike score measures distance above the adaptive chat baseline.</p>
+    <section className="panel"><h2>Recording and detection</h2><p className="secondary">Settings apply when a recording starts. The spike score combines unusual volume, relative increase, and how many people joined in.</p>
       <div className="settings-fields">
         <label>Stream quality<select value={value.quality} onChange={e=>change("quality",e.target.value)}>
           {["best","1080p","720p","480p","360p","worst"].map(q=><option key={q}>{q}</option>)}</select></label>
@@ -335,13 +342,13 @@ function AnalyticsView({state}: {state:State}) {
       <Metric icon={<HardDrive/>} label="Storage" value={size(stats?.bytes??0)}/>
     </div><div className="two-panels"><section className="panel"><h2>Strongest chat spikes</h2>
       {data?.peaks.length?data.peaks.map(p=><div className="activity-row" key={p.id}><Zap size={14}/>
-        <div className="grow"><b>{p.channel}</b><small>{date(p.onset)} · {p.status}</small></div><b>{number.format(p.score)}</b></div>)
+        <div className="grow"><b>{p.channel}</b><small>{date(p.onset)} · {p.status}</small></div><b>{scoreLabel(p.score,p.scoreVersion)}</b></div>)
         :<p className="secondary">No detected events in this period.</p>}
     </section><section className="panel"><h2>Clips by streamer</h2>
       {data?.groups.length?data.groups.map(p=><div className="activity-row" key={p.channel}><Video size={14}/><div className="grow">{p.channel}</div>
         <b>{p.clips}</b><small>{size(p.bytes)}</small></div>):<p className="secondary">No saved clips in this period.</p>}
       <div className="detailed">
-        <div>Average spike score <b>{stats?.score==null?"—":number.format(stats.score)}</b></div>
+        <div>Average spike score <b>{stats?.score==null?"—":number.format(stats.score)+"/100"}</b></div>
         <div>Average clip duration <b>{stats?.duration==null?"—":number.format(stats.duration)+"s"}</b></div>
       </div>
     </section></div>

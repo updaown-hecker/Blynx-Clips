@@ -67,6 +67,15 @@ class Engine:
         self.system = {"cpu": 0.0, "memory": 0, "processes": 0, "bytes": 0}
         self.samples: dict[str, deque] = {}
         self.scan: asyncio.Task | None = None
+        self.follow_url = os.getenv("BLYNX_FOLLOW_URL", "").strip()
+        if self.follow_url:
+            source = parse_url(self.follow_url)
+            if source.kind == "video":
+                raise PlatformError("BLYNX_FOLLOW_URL needs a channel link for recurring broadcasts")
+            self.follow_url = source.url
+        self.follow_due = 0.0
+        self.prune_enabled = os.getenv("BLYNX_SERVER_PRUNE") == "1"
+        self.prune_due = 0.0
         self.demo_id = "simulation"
         self.auth_task: asyncio.Task | None = None
         self.auth_state = ""
@@ -115,11 +124,14 @@ class Engine:
 
     def invalidate(self) -> None:
         self.discovery_due = 0
+        self.follow_due = 0
         self.check_at.clear()
         self.wake.set()
 
     async def add(self, url: str) -> dict:
         source = parse_url(url)
+        if self.follow_url and source.url != self.follow_url:
+            raise PlatformError("This server follows the channel configured in BLYNX_FOLLOW_URL")
         adapter = self.twitch if source.platform == "Twitch" else self.youtube
         remote, name, avatar = await adapter.resolve(source)
         video = source.key if source.platform == "YouTube" and source.kind == "video" else ""
@@ -237,13 +249,49 @@ class Engine:
             self.store.execute("UPDATE clip SET status='failed',reason=? WHERE id=?", (reason[-500:], job.id))
             self.activity(f"Clip failed · {reason[-240:]}", "error")
 
+    async def register_follow_channel(self) -> None:
+        try:
+            channel = await self.add(self.follow_url)
+            self.activity(f'{channel["name"]} added for continuous monitoring')
+        except Exception as exc:
+            self.activity("Channel setup waiting · " + public_error(exc), "warning")
+
+    def prune_clips(self, output: Path, needed: float) -> int:
+        reclaimed = 0
+        for row in self.store.all("""
+            SELECT id,path,bytes FROM clip WHERE status='ready' AND score>0
+            AND simulated=0 AND favorite=0 AND review='New' ORDER BY onset
+        """):
+            path = Path(row["path"])
+            if path.is_symlink() or path.suffix != ".mp4" or path.resolve().parent != output.resolve():
+                continue
+            try:
+                path.with_suffix(".jpg").unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            self.store.execute("DELETE FROM clip WHERE id=?", (row["id"],))
+            reclaimed += row["bytes"]
+            if reclaimed >= needed:
+                break
+        if reclaimed:
+            self.activity("Removed older unreviewed highlights to stay within the storage limit")
+        return reclaimed
+
     async def supervisor(self) -> None:
         await self.recover()
         while not self.stop:
             self.wake.clear()
             channels = self.store.all("SELECT * FROM channel WHERE enabled=1 ORDER BY priority DESC, name")
-            if self.running and channels and (self.scan is None or self.scan.done()):
-                self.scan = asyncio.create_task(self.discover(channels))
+            if self.follow_url:
+                channels = [c for c in channels if c["url"] == self.follow_url]
+            if self.running and (self.scan is None or self.scan.done()):
+                if channels:
+                    self.scan = asyncio.create_task(self.discover(channels))
+                elif self.follow_url and time.monotonic() >= self.follow_due:
+                    self.follow_due = time.monotonic() + 60
+                    if not self.store.item("SELECT id FROM channel WHERE url=?", (self.follow_url,)):
+                        self.scan = asyncio.create_task(self.register_follow_channel())
             desired: dict[str, tuple[dict, Live]] = {}
             settings = self.store.settings
             disk = shutil.disk_usage(self.store.root)
@@ -252,7 +300,11 @@ class Engine:
             output_free = shutil.disk_usage(output).free
             saved = self.store.item("SELECT coalesce(sum(bytes),0) AS bytes FROM clip WHERE status='ready'")["bytes"]
             buffer_bytes = sum(s.get("bufferBytes", 0) for s in self.status.values())
-            disk_ok = min(disk.free, output_free) > 150_000_000 and saved + buffer_bytes < settings.disk_gb * 1_000_000_000
+            budget = settings.disk_gb * 1_000_000_000
+            if self.prune_enabled and saved + buffer_bytes >= budget * 0.95 and time.monotonic() >= self.prune_due:
+                self.prune_due = time.monotonic() + 60
+                saved -= self.prune_clips(output, saved + buffer_bytes - budget * 0.85)
+            disk_ok = min(disk.free, output_free) > 150_000_000 and saved + buffer_bytes < budget
             if self.demo:
                 demo = {"id": self.demo_id, "name": "Simulation", "platform": "Simulation", "offset": 0,
                         "avatar": "", "preset": ""}
@@ -423,6 +475,9 @@ class Engine:
                 result = detector.tick(when, bucket.bucket() if covered else None)
                 health = min(settings.buffer, max(0.0, recorder.segments[-1].end - recorder.segments[0].start)) if recorder.segments else 0
                 size = sum(item.path.stat().st_size for item in recorder.segments)
+                for field in ("score", "baseline", "provisional", "unique5", "comparedWindows", "similarWindows"):
+                    if field not in detector.metrics:
+                        data.pop(field, None)
                 data.update({"recording": "Recording" if recorder.segments else "Buffering",
                              "mps": bucket.count, "raw5": sum(list(raw)[-5:]), "raw15": sum(list(raw)[-15:]),
                              "raw30": sum(raw), "acceleration": raw[-1] - raw[-2] if len(raw) > 1 else 0,
@@ -443,7 +498,7 @@ class Engine:
                     active = Job(event, clipid, target)
                     self.store.execute("""
                         INSERT OR IGNORE INTO clip(id,channel,name,platform,broadcast,source,onset,score,offset,
-                        status,path,provisional,simulated,journal) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        status,path,provisional,simulated,journal,score_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,2)""",
                         (clipid, channel["name"], name, channel["platform"], live.broadcast, live.url, event.onset,
                          event.peak, offset, "capturing", str(target), event.provisional, mock, json.dumps(journal(active))))
                     self.activity(f'{channel["name"]} · chat spike detected')
@@ -516,7 +571,7 @@ class Engine:
             if key == self.demo_id:
                 c["live"] = {"title": "Synthetic chat and generated test video"}
             c["samples"] = list(self.samples.get(key, []))
-        clips = self.store.all("""SELECT id,channel,name,platform,broadcast,source,onset,score,offset,reason,status,
+        clips = self.store.all("""SELECT id,channel,name,platform,broadcast,source,onset,score,score_version AS scoreVersion,offset,reason,status,
                                 review,favorite,duration,bytes,partial,thumbnail,provisional,simulated
                                 FROM clip ORDER BY onset DESC LIMIT 500""")
         return {"channels": channels, "clips": clips, "activities": list(self.activities), "running": self.running,
