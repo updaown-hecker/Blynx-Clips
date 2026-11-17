@@ -20,13 +20,10 @@ Run the Docker Compose service on your CasaOS server from an SSH shell. It runs 
 Clone this private repository using a GitHub account authorized to access it, or extract its source ZIP on the server. In the project directory:
 
 ```bash
-cp server.env.example server.env
-nano server.env
+test -e server.env || cp server.env.example server.env
 docker compose --env-file server.env up -d --build
 docker compose --env-file server.env logs -f
 ```
-
-Set `BLYNX_FOLLOW_URL` to the streamer's channel page, such as `https://www.twitch.tv/theirname` or `https://www.youtube.com/@theirchannel`. Use their channel page to pick up future broadcasts. A configured URL locks automatic monitoring to that channel. The service retries registration while it waits for platform credentials. Offline channels use no recorder, and capture starts when the platform reports a live broadcast. Twitch status is checked about every 45 seconds. YouTube channel checks share the API search budget and can take longer.
 
 From your desktop, forward the server dashboard to your own device:
 
@@ -35,6 +32,10 @@ ssh -N -L 17866:127.0.0.1:17866 YOUR_USER@YOUR_SERVER_IP
 ```
 
 While SSH is open, visit [the server dashboard](http://127.0.0.1:17866). In **Settings → Platform connections**, set up Twitch or YouTube once. Twitch accepts the Client ID you already registered. Use **Sign in with Twitch** to authorize this server separately. For YouTube, paste your API key. The service keeps running after you close the browser and SSH tunnel. Look for ready clips in **Highlights** and download them from the dashboard.
+
+Use **Add streamer** in the dashboard after connecting the platform. To follow future broadcasts, paste a channel page such as `https://www.twitch.tv/theirname` or `https://www.youtube.com/@theirchannel`. Use **Streamers** to disable or remove channels. The server saves your list across restarts. Offline channels use no recorder. Twitch checks run about every 45 seconds. YouTube channel checks share the API search budget and can take longer.
+
+`BLYNX_FOLLOW_URL` is optional. Set it only to pin unattended monitoring to one channel and automatically add that channel if it is missing. To switch an existing installation to dashboard management, clear or comment out that variable in `server.env`, then run `docker compose --env-file server.env up -d`.
 
 The Linux container shares the host network and the app binds only to port 17866 on loopback. The local dashboard assumes users on the host are trusted. The server presets use one recording slot and prefer 720p, falling back to the best available resolution. Headless credentials are stored in permission-restricted files on the server volume. Treat volume backups as sensitive. Use `docker compose --env-file server.env down` to stop the service and keep your library.
 
