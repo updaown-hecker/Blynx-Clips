@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 from .engine import Engine, public_error
 from .media import run
 from .platforms import PlatformError, Twitch, YouTube, write_secret
+from .server import lan_ip
 from .store import Settings, Store
 from .tab_capture import save_tab_capture
 
@@ -29,6 +30,9 @@ HOST = urlsplit(ORIGIN).netloc
 PUBLIC_ORIGIN = os.getenv("BLYNX_PUBLIC_ORIGIN", "").strip().rstrip("/")
 PUBLIC_HOST = urlsplit(PUBLIC_ORIGIN).netloc
 WEB_PASSWORD = os.getenv("BLYNX_WEB_PASSWORD", "")
+LAN_HOST = f"{address}:{os.getenv('BLYNX_PORT', '17865')}" if (address := lan_ip()) else ""
+LAN_ORIGIN = f"http://{LAN_HOST}" if LAN_HOST else ""
+LAN_PASSWORD = os.getenv("BLYNX_LAN_PASSWORD", "")
 if PUBLIC_ORIGIN:
     parts = urlsplit(PUBLIC_ORIGIN)
     if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
@@ -36,6 +40,8 @@ if PUBLIC_ORIGIN:
         raise ValueError("BLYNX_PUBLIC_ORIGIN must be a separate HTTPS origin, without a path")
     if len(WEB_PASSWORD) < 24:
         raise ValueError("Set BLYNX_WEB_PASSWORD to a random password at least 24 characters long")
+if LAN_ORIGIN and (len(LAN_PASSWORD) < 24 or LAN_PASSWORD == WEB_PASSWORD):
+    raise ValueError("Set BLYNX_LAN_PASSWORD to a separate random password at least 24 characters long")
 COOKIE = "blynx_clips_server_session" if os.getenv("BLYNX_SERVER_MODE") == "1" else "blynx_clips_session"
 SESSION = secrets.token_urlsafe(32)
 
@@ -81,8 +87,21 @@ if (FRONTEND / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=FRONTEND / "assets"), name="assets")
 
 
+def session_token(origin: str) -> str:
+    return hmac.new(SESSION.encode(), origin.encode(), hashlib.sha256).hexdigest()
+
+
 def safe_cookie(request: Request | WebSocket) -> bool:
-    return hmac.compare_digest(request.cookies.get(COOKIE, "").encode(), SESSION.encode())
+    origin = dashboard_origin(request.headers.get("host", ""))
+    return hmac.compare_digest(request.cookies.get(COOKIE, "").encode(), session_token(origin).encode())
+
+
+def dashboard_password(origin: str) -> str:
+    if origin == LAN_ORIGIN:
+        return LAN_PASSWORD
+    if PUBLIC_ORIGIN:
+        return WEB_PASSWORD
+    return LAN_PASSWORD if LAN_ORIGIN else ""
 
 
 def dashboard_origin(host: str) -> str:
@@ -90,6 +109,8 @@ def dashboard_origin(host: str) -> str:
         return ORIGIN
     if PUBLIC_HOST and host == PUBLIC_HOST:
         return PUBLIC_ORIGIN
+    if LAN_HOST and host == LAN_HOST:
+        return LAN_ORIGIN
     return ""
 
 
@@ -115,7 +136,7 @@ async def local(request: Request, next_call):
     origin = dashboard_origin(host)
     if not origin:
         return JSONResponse({"detail": "Dashboard host is not configured"}, 403)
-    remote = origin == PUBLIC_ORIGIN
+    remote = origin != ORIGIN
     if remote and (extension or path.startswith("/api/pair")):
         return JSONResponse({"detail": "Browser extension pairing requires local access"}, 403)
     if extension and (extension_origin or not request_origin):
@@ -160,21 +181,22 @@ async def local(request: Request, next_call):
 
 @app.get("/")
 async def index(request: Request):
-    if PUBLIC_ORIGIN and not safe_cookie(request):
+    if (PUBLIC_ORIGIN or LAN_ORIGIN) and not safe_cookie(request):
         return login_page()
     if not (FRONTEND / "index.html").is_file():
         return JSONResponse({"detail": "Frontend is missing. Run npm ci && npm run build in frontend."}, 503)
     response = FileResponse(FRONTEND / "index.html")
-    if not PUBLIC_ORIGIN:
-        response.set_cookie(COOKIE, SESSION, httponly=True, samesite="strict")
+    if not (PUBLIC_ORIGIN or LAN_ORIGIN):
+        response.set_cookie(COOKIE, session_token(ORIGIN), httponly=True, samesite="strict")
     return response
 
 
 @app.post("/")
 async def dashboard_login(request: Request):
-    if not PUBLIC_ORIGIN:
-        raise HTTPException(404)
     origin = dashboard_origin(request.headers.get("host", ""))
+    password = dashboard_password(origin)
+    if not password:
+        raise HTTPException(404)
     if request.headers.get("origin") != origin:
         raise HTTPException(403, "Use the dashboard sign-in page")
     if request.headers.get("content-type") != "application/x-www-form-urlencoded":
@@ -189,10 +211,10 @@ async def dashboard_login(request: Request):
     except ValueError:
         return login_page(invalid=True)
     supplied = params.get("password", [""])[0]
-    if not hmac.compare_digest(supplied.encode(), WEB_PASSWORD.encode()):
+    if not hmac.compare_digest(supplied.encode(), password.encode()):
         return login_page(invalid=True)
     response = RedirectResponse("/", status_code=303)
-    response.set_cookie(COOKIE, SESSION, httponly=True, secure=origin == PUBLIC_ORIGIN, samesite="strict")
+    response.set_cookie(COOKIE, session_token(origin), httponly=True, secure=origin == PUBLIC_ORIGIN, samesite="strict")
     return response
 
 

@@ -50,3 +50,26 @@ def test_forwarded_dashboard_requires_password_and_accepts_only_matching_origin(
                 pass
         with client.websocket_connect("wss://" + host + "/ws", headers={"Origin": public}) as socket:
             assert "channels" in socket.receive_json()
+
+
+def test_lan_sign_in_is_separate_from_public_https(tmp_path, monkeypatch):
+    public = "https://clips.example.test"
+    lan = "http://192.168.4.73:17866"
+    public_password = "public-test-password-32-characters"
+    lan_password = "separate-lan-password-32-characters"
+    monkeypatch.setenv("BLYNX_DATA_DIR", str(tmp_path))
+    for key, value in {"PUBLIC_ORIGIN": public, "PUBLIC_HOST": "clips.example.test",
+                       "LAN_ORIGIN": lan, "LAN_HOST": "192.168.4.73:17866",
+                       "LAN_PASSWORD": lan_password, "WEB_PASSWORD": public_password}.items():
+        monkeypatch.setattr(dashboard, key, value)
+
+    with TestClient(dashboard.app, base_url=lan) as client:
+        assert "Dashboard password" in client.get("/").text
+        assert client.get("/api/state").status_code == 401
+        assert client.post("/", data={"password": public_password}, headers={"Origin": lan}).status_code == 401
+        reply = client.post("/", data={"password": lan_password}, headers={"Origin": lan}, follow_redirects=False)
+        assert reply.status_code == 303 and "secure" not in reply.headers["set-cookie"].lower()
+        assert client.get("/api/state").status_code == 200
+        assert client.get(public + "/api/state", headers={"Cookie": reply.headers["set-cookie"].split(";")[0]}).status_code == 401
+        with client.websocket_connect(lan.replace("http://", "ws://", 1) + "/ws", headers={"Origin": lan}) as socket:
+            assert "channels" in socket.receive_json()
