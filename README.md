@@ -37,23 +37,21 @@ Use **Add streamer** in the dashboard after connecting the platform. To follow f
 
 `BLYNX_FOLLOW_URL` is optional. Set it only to pin unattended monitoring to one channel and automatically add that channel if it is missing. To switch an existing installation to dashboard management, clear or comment out that variable in `server.env`, then run `docker compose --env-file server.env up -d`.
 
-The Linux container shares the host network and the app binds to port 17866 on loopback when no dashboard password is configured. The local dashboard assumes users on the host are trusted in this mode. The server presets use one recording slot and prefer 720p, falling back to the best available resolution. Headless credentials are stored in permission-restricted files on the server volume. Treat volume backups as sensitive. Use `docker compose --env-file server.env down` to stop the service and keep your library.
+The Linux container shares the host network and the app listens on port 17866 on all IPv4 interfaces. The dashboard assumes users who can reach it are trusted. The server presets use one recording slot and prefer 720p, falling back to the best available resolution. Headless credentials are stored in permission-restricted files on the server volume. Treat volume backups as sensitive. Use `docker compose --env-file server.env down` to stop the service and keep your library.
 
 Automatic storage reclamation is optional. Set `BLYNX_SERVER_PRUNE=1` in `server.env` before starting the service to remove the oldest unreviewed, non-favorite automatic clips when near the configured storage limit. Manual, reviewed, favorite and exported clips are kept. If protected clips fill the budget, recording pauses until you free space or raise the limit.
 
 ### Forward the dashboard through Cloudflare Tunnel
 
-Generate a private dashboard password with `openssl rand -hex 32`. In your existing `server.env`, set `BLYNX_PUBLIC_ORIGIN=https://clips.blynx.vip` (or your chosen HTTPS hostname) and `BLYNX_WEB_PASSWORD` to the generated password. Rebuild with `docker compose --env-file server.env up -d --build`.
+In `server.env`, set `BLYNX_PUBLIC_ORIGIN=https://clips.blynx.vip` (or your chosen HTTPS hostname). Apply it with `docker compose --env-file server.env up -d`.
 
-On the Cloudflare tunnel running on the CasaOS host, add a published route for the same hostname. Use **HTTP** with the local service `127.0.0.1:17866`. Leave any Origin HTTP Host Header override empty so the app receives the public hostname. If cloudflared runs in Docker bridge mode, use the server's LAN IP as the origin. A host-network connector can use loopback directly. Enable HTTPS redirects for the public hostname at Cloudflare so the login is always served over HTTPS.
+On the Cloudflare tunnel, add a published route for the same hostname. Use **HTTP** with `127.0.0.1:17866` if cloudflared shares the CasaOS host network, or the server's LAN IP and port 17866 if cloudflared runs in a bridged container. Leave the HTTP Host Header override empty.
 
-Visit the public HTTPS URL and enter the dashboard password. The public dashboard uses a secure session cookie and supports live updates, clip previews and downloads. Local SSH access remains available and uses the same dashboard password when forwarding is configured. Route public traffic through the HTTPS tunnel.
+The dashboard opens directly. If you publish it outside your trusted network, configure access control at your tunnel or reverse proxy. Apply that control to the dashboard, API, media URLs, and WebSocket endpoint.
 
 ### Direct access on home Wi-Fi
 
-Set `BLYNX_WEB_PASSWORD` in the Docker environment (in `server.env` with Compose). Generate one with `openssl rand -hex 32`, or keep your existing web password. With a password configured, the server listens on all IPv4 interfaces and requires that password on the LAN, SSH, and optional Cloudflare dashboard. If present, the older `BLYNX_LAN_IP` and `BLYNX_LAN_PASSWORD` settings can be removed.
-
-Run `docker compose --env-file server.env up -d --build`. Find the server’s current private IP with `ip -br -4 addr` and open `http://SERVER_LAN_IP:17866`. Direct Wi-Fi access uses plain HTTP. Use the HTTPS address for sign-in over networks you don't trust.
+Find the server’s current private IP with `ip -br -4 addr` and open `http://SERVER_LAN_IP:17866`. The desktop app still listens on loopback. Older `BLYNX_WEB_PASSWORD`, `BLYNX_LAN_IP`, and `BLYNX_LAN_PASSWORD` settings are obsolete and can be removed.
 
 ## Platform setup
 

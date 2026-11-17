@@ -47,6 +47,6 @@ def private_ipv4(value: str) -> bool:
 
 
 def dashboard_bind() -> str:
-    if os.getenv("BLYNX_SERVER_MODE") == "1" and os.getenv("BLYNX_WEB_PASSWORD"):
+    if os.getenv("BLYNX_SERVER_MODE") == "1":
         return "0.0.0.0"
     return "127.0.0.1"

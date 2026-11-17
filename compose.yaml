@@ -7,7 +7,6 @@ services:
     network_mode: host
     environment:
       BLYNX_PUBLIC_ORIGIN: "${BLYNX_PUBLIC_ORIGIN:-}"
-      BLYNX_WEB_PASSWORD: "${BLYNX_WEB_PASSWORD:-}"
       BLYNX_FOLLOW_URL: "${BLYNX_FOLLOW_URL:-}"
       BLYNX_SERVER_PRUNE: "${BLYNX_SERVER_PRUNE:-0}"
     volumes:
