@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 from .engine import Engine, public_error
 from .media import run
 from .platforms import PlatformError, Twitch, YouTube, write_secret
-from .server import lan_ip
+from .server import lan_ip, private_ipv4
 from .store import Settings, Store
 from .tab_capture import save_tab_capture
 
@@ -30,7 +30,9 @@ HOST = urlsplit(ORIGIN).netloc
 PUBLIC_ORIGIN = os.getenv("BLYNX_PUBLIC_ORIGIN", "").strip().rstrip("/")
 PUBLIC_HOST = urlsplit(PUBLIC_ORIGIN).netloc
 WEB_PASSWORD = os.getenv("BLYNX_WEB_PASSWORD", "")
-LAN_HOST = f"{address}:{os.getenv('BLYNX_PORT', '17865')}" if (address := lan_ip()) else ""
+LAN_ADDRESS = lan_ip()
+LAN_PORT = os.getenv("BLYNX_PORT", "17865")
+LAN_HOST = f"{LAN_ADDRESS}:{LAN_PORT}" if LAN_ADDRESS else ""
 LAN_ORIGIN = f"http://{LAN_HOST}" if LAN_HOST else ""
 LAN_PASSWORD = os.getenv("BLYNX_LAN_PASSWORD", "")
 if PUBLIC_ORIGIN:
@@ -97,7 +99,7 @@ def safe_cookie(request: Request | WebSocket) -> bool:
 
 
 def dashboard_password(origin: str) -> str:
-    if origin == LAN_ORIGIN:
+    if origin and origin not in (ORIGIN, PUBLIC_ORIGIN):
         return LAN_PASSWORD
     if PUBLIC_ORIGIN:
         return WEB_PASSWORD
@@ -109,7 +111,11 @@ def dashboard_origin(host: str) -> str:
         return ORIGIN
     if PUBLIC_HOST and host == PUBLIC_HOST:
         return PUBLIC_ORIGIN
-    if LAN_HOST and host == LAN_HOST:
+    if LAN_ADDRESS == "0.0.0.0":
+        address, _, port = host.partition(":")
+        if port == LAN_PORT and private_ipv4(address):
+            return f"http://{host}"
+    elif LAN_HOST and host == LAN_HOST:
         return LAN_ORIGIN
     return ""
 

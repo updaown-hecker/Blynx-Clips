@@ -38,14 +38,16 @@ def write_credential(path: Path, value: str) -> None:
 PRIVATE_NETWORKS = tuple(IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
 
-def lan_ip() -> str:
-    value = os.getenv("BLYNX_LAN_IP", "").strip()
-    if not value:
-        return ""
+def private_ipv4(value: str) -> bool:
     try:
         address = IPv4Address(value)
-        if any(address in network for network in PRIVATE_NETWORKS):
-            return str(address)
     except ValueError:
-        pass
-    raise ValueError("BLYNX_LAN_IP must be a private IPv4 address assigned to the server")
+        return False
+    return any(address in network for network in PRIVATE_NETWORKS)
+
+
+def lan_ip() -> str:
+    value = os.getenv("BLYNX_LAN_IP", "").strip()
+    if value in ("", "0.0.0.0") or private_ipv4(value):
+        return value
+    raise ValueError("BLYNX_LAN_IP must be a private IPv4 address or 0.0.0.0")

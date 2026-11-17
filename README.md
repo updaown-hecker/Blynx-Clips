@@ -51,9 +51,9 @@ Visit the public HTTPS URL and enter the dashboard password. The public dashboar
 
 ### Direct access on home Wi-Fi
 
-Set `BLYNX_LAN_IP` to the CasaOS host's private IPv4 address and `BLYNX_LAN_PASSWORD` to a separate password generated with `openssl rand -hex 32`. Run `docker compose --env-file server.env up -d --build`. Open `http://SERVER_LAN_IP:17866` and sign in with the LAN password. The loopback listener stays available. When only LAN access is enabled, the loopback dashboard also uses the LAN password.
+Set `BLYNX_LAN_IP=0.0.0.0` to listen on all IPv4 interfaces, or set it to one private IPv4 address to bind just that address and loopback. Set `BLYNX_LAN_PASSWORD` to a separate password generated with `openssl rand -hex 32`. Run `docker compose --env-file server.env up -d --build`. Find the server's current private IP with `ip -br -4 addr`, then open `http://SERVER_LAN_IP:17866` and sign in with the LAN password. The loopback listener stays available. When only LAN access is enabled, the loopback dashboard also uses the LAN password.
 
-Direct LAN access uses HTTP. Use it on a trusted LAN and use the public HTTPS address for setting up platform credentials. If the server's address changes, update `BLYNX_LAN_IP` before restarting.
+Direct LAN access uses HTTP. Use it on a trusted LAN and use the public HTTPS address for setting up platform credentials. If the configured LAN address is unavailable, monitoring continues on loopback and the service logs a warning. Run `ip -br -4 addr` on the server to check its current address, update `BLYNX_LAN_IP`, and recreate the container with `docker compose --env-file server.env up -d`.
 
 ## Platform setup
 
