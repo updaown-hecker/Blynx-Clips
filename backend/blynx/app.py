@@ -9,10 +9,11 @@ import time
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
@@ -24,8 +25,18 @@ from .tab_capture import save_tab_capture
 
 FRONTEND = Path(os.getenv("BLYNX_FRONTEND", Path(__file__).resolve().parents[2] / "frontend" / "dist"))
 ORIGIN = os.getenv("BLYNX_LOCAL_ORIGIN", "http://127.0.0.1:17865")
-HOST = ORIGIN.split("://", 1)[1]
-COOKIE = "blynx_clips_session"
+HOST = urlsplit(ORIGIN).netloc
+PUBLIC_ORIGIN = os.getenv("BLYNX_PUBLIC_ORIGIN", "").strip().rstrip("/")
+PUBLIC_HOST = urlsplit(PUBLIC_ORIGIN).netloc
+WEB_PASSWORD = os.getenv("BLYNX_WEB_PASSWORD", "")
+if PUBLIC_ORIGIN:
+    parts = urlsplit(PUBLIC_ORIGIN)
+    if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
+            or parts.path or parts.query or parts.fragment or PUBLIC_HOST == HOST):
+        raise ValueError("BLYNX_PUBLIC_ORIGIN must be a separate HTTPS origin, without a path")
+    if len(WEB_PASSWORD) < 24:
+        raise ValueError("Set BLYNX_WEB_PASSWORD to a random password at least 24 characters long")
+COOKIE = "blynx_clips_server_session" if os.getenv("BLYNX_SERVER_MODE") == "1" else "blynx_clips_session"
 SESSION = secrets.token_urlsafe(32)
 
 
@@ -74,6 +85,26 @@ def safe_cookie(request: Request | WebSocket) -> bool:
     return hmac.compare_digest(request.cookies.get(COOKIE, "").encode(), SESSION.encode())
 
 
+def dashboard_origin(host: str) -> str:
+    if host == HOST:
+        return ORIGIN
+    if PUBLIC_HOST and host == PUBLIC_HOST:
+        return PUBLIC_ORIGIN
+    return ""
+
+
+def login_page(invalid: bool = False) -> HTMLResponse:
+    error = '<p role="alert">Incorrect password.</p>' if invalid else ""
+    return HTMLResponse(
+        '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
+        '<title>Sign in · Blynx Clips</title><main><h1>Blynx Clips</h1>'
+        '<form action="/" method="post"><label for="password">Dashboard password</label><br>'
+        '<input type="password" id="password" name="password" autocomplete="current-password" maxlength="512" required>'
+        '<button type="submit">Sign in</button>' + error + '</form></main></html>',
+        status_code=401 if invalid else 200,
+    )
+
+
 @app.middleware("http")
 async def local(request: Request, next_call):
     host = request.headers.get("host", "")
@@ -81,8 +112,12 @@ async def local(request: Request, next_call):
     path = request.url.path
     extension = path.startswith("/api/extension/")
     extension_origin = request_origin.startswith("chrome-extension://")
-    if host != HOST:
-        return JSONResponse({"detail": "Host is not the configured loopback address"}, 403)
+    origin = dashboard_origin(host)
+    if not origin:
+        return JSONResponse({"detail": "Dashboard host is not configured"}, 403)
+    remote = origin == PUBLIC_ORIGIN
+    if remote and (extension or path.startswith("/api/pair")):
+        return JSONResponse({"detail": "Browser extension pairing requires local access"}, 403)
     if extension and (extension_origin or not request_origin):
         if request.method == "OPTIONS":
             response = JSONResponse({}, 200)
@@ -109,26 +144,55 @@ async def local(request: Request, next_call):
             if not safe_cookie(request):
                 return JSONResponse({"detail": "Open the local dashboard first"}, 401)
             if request.method not in ("GET", "HEAD") and (
-                request_origin != ORIGIN or request.headers.get("x-blynx-local") != "1"
+                request_origin != origin or request.headers.get("x-blynx-local") != "1"
             ):
                 return JSONResponse({"detail": "Local dashboard origin and request header are required"}, 403)
-            if request_origin and request_origin != ORIGIN:
+            if request_origin and request_origin != origin:
                 return JSONResponse({"detail": "Cross-origin requests are disabled"}, 403)
         response = await next_call(request)
     response.headers.update({"X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
                              "X-Frame-Options": "DENY", "Cache-Control": "no-store",
                              "Content-Security-Policy": "default-src 'self'; img-src 'self' https: data:; "
-                             "style-src 'self' 'unsafe-inline'; connect-src 'self' " + ORIGIN.replace("http:", "ws:") +
+                             "style-src 'self' 'unsafe-inline'; connect-src 'self' " + origin.replace("http", "ws", 1) +
                              "; media-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
     return response
 
 
 @app.get("/")
-async def index():
+async def index(request: Request):
+    if PUBLIC_ORIGIN and not safe_cookie(request):
+        return login_page()
     if not (FRONTEND / "index.html").is_file():
         return JSONResponse({"detail": "Frontend is missing. Run npm ci && npm run build in frontend."}, 503)
     response = FileResponse(FRONTEND / "index.html")
-    response.set_cookie(COOKIE, SESSION, httponly=True, samesite="strict")
+    if not PUBLIC_ORIGIN:
+        response.set_cookie(COOKIE, SESSION, httponly=True, samesite="strict")
+    return response
+
+
+@app.post("/")
+async def dashboard_login(request: Request):
+    if not PUBLIC_ORIGIN:
+        raise HTTPException(404)
+    origin = dashboard_origin(request.headers.get("host", ""))
+    if request.headers.get("origin") != origin:
+        raise HTTPException(403, "Use the dashboard sign-in page")
+    if request.headers.get("content-type") != "application/x-www-form-urlencoded":
+        raise HTTPException(415)
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 2048:
+            raise HTTPException(413)
+    try:
+        params = parse_qs(body.decode("ascii"), max_num_fields=1)
+    except ValueError:
+        return login_page(invalid=True)
+    supplied = params.get("password", [""])[0]
+    if not hmac.compare_digest(supplied.encode(), WEB_PASSWORD.encode()):
+        return login_page(invalid=True)
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(COOKIE, SESSION, httponly=True, secure=origin == PUBLIC_ORIGIN, samesite="strict")
     return response
 
 
@@ -152,7 +216,8 @@ async def state():
 
 @app.websocket("/ws")
 async def websocket(socket: WebSocket):
-    if socket.headers.get("host") != HOST or socket.headers.get("origin") != ORIGIN or not safe_cookie(socket):
+    origin = dashboard_origin(socket.headers.get("host", ""))
+    if not origin or socket.headers.get("origin") != origin or not safe_cookie(socket):
         await socket.close(code=1008)
         return
     await socket.accept()

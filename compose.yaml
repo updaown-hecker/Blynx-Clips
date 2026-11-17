@@ -8,6 +8,8 @@ services:
     environment:
       BLYNX_PORT: "17866"
       BLYNX_LOCAL_ORIGIN: "http://127.0.0.1:17866"
+      BLYNX_PUBLIC_ORIGIN: "${BLYNX_PUBLIC_ORIGIN:-}"
+      BLYNX_WEB_PASSWORD: "${BLYNX_WEB_PASSWORD:-}"
       BLYNX_FOLLOW_URL: "${BLYNX_FOLLOW_URL:-}"
       BLYNX_SERVER_PRUNE: "${BLYNX_SERVER_PRUNE:-0}"
     volumes:
