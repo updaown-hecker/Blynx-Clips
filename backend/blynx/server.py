@@ -46,8 +46,7 @@ def private_ipv4(value: str) -> bool:
     return any(address in network for network in PRIVATE_NETWORKS)
 
 
-def lan_ip() -> str:
-    value = os.getenv("BLYNX_LAN_IP", "").strip()
-    if value in ("", "0.0.0.0") or private_ipv4(value):
-        return value
-    raise ValueError("BLYNX_LAN_IP must be a private IPv4 address or 0.0.0.0")
+def dashboard_bind() -> str:
+    if os.getenv("BLYNX_SERVER_MODE") == "1" and os.getenv("BLYNX_WEB_PASSWORD"):
+        return "0.0.0.0"
+    return "127.0.0.1"

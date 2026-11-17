@@ -52,46 +52,44 @@ def test_forwarded_dashboard_requires_password_and_accepts_only_matching_origin(
             assert "channels" in socket.receive_json()
 
 
-def test_lan_sign_in_is_separate_from_public_https(tmp_path, monkeypatch):
+def test_one_password_enables_lan_and_public_dashboard(tmp_path, monkeypatch):
     public = "https://clips.example.test"
-    lan = "http://192.168.4.73:17866"
-    public_password = "public-test-password-32-characters"
-    lan_password = "separate-lan-password-32-characters"
+    lan = "http://192.168.4.93:17866"
+    password = "shared-test-password-32-characters"
     monkeypatch.setenv("BLYNX_DATA_DIR", str(tmp_path))
-    for key, value in {"PUBLIC_ORIGIN": public, "PUBLIC_HOST": "clips.example.test",
-                       "LAN_ORIGIN": lan, "LAN_HOST": "192.168.4.73:17866",
-                       "LAN_PASSWORD": lan_password, "WEB_PASSWORD": public_password}.items():
-        monkeypatch.setattr(dashboard, key, value)
+    monkeypatch.setattr(dashboard, "PUBLIC_ORIGIN", public)
+    monkeypatch.setattr(dashboard, "PUBLIC_HOST", "clips.example.test")
+    monkeypatch.setattr(dashboard, "LAN_ENABLED", True)
+    monkeypatch.setattr(dashboard, "LAN_PORT", "17866")
+    monkeypatch.setattr(dashboard, "WEB_PASSWORD", password)
 
     with TestClient(dashboard.app, base_url=lan) as client:
         assert "Dashboard password" in client.get("/").text
-        assert client.get("/api/state").status_code == 401
-        assert client.post("/", data={"password": public_password}, headers={"Origin": lan}).status_code == 401
-        reply = client.post("/", data={"password": lan_password}, headers={"Origin": lan}, follow_redirects=False)
-        assert reply.status_code == 303 and "secure" not in reply.headers["set-cookie"].lower()
-        assert client.get("/api/state").status_code == 200
-        assert client.get(public + "/api/state", headers={"Cookie": reply.headers["set-cookie"].split(";")[0]}).status_code == 401
-        with client.websocket_connect(lan.replace("http://", "ws://", 1) + "/ws", headers={"Origin": lan}) as socket:
-            assert "channels" in socket.receive_json()
-
-
-def test_wildcard_listener_accepts_current_private_ip_only(tmp_path, monkeypatch):
-    lan = "http://192.168.4.93:17866"
-    password = "separate-lan-password-32-characters"
-    monkeypatch.setenv("BLYNX_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(dashboard, "LAN_ADDRESS", "0.0.0.0")
-    monkeypatch.setattr(dashboard, "LAN_PORT", "17866")
-    monkeypatch.setattr(dashboard, "LAN_HOST", "0.0.0.0:17866")
-    monkeypatch.setattr(dashboard, "LAN_ORIGIN", "http://0.0.0.0:17866")
-    monkeypatch.setattr(dashboard, "LAN_PASSWORD", password)
-
-    with TestClient(dashboard.app, base_url=lan) as client:
         assert client.get("/api/health").status_code == 200
         assert client.get("http://8.8.8.8:17866/api/health").status_code == 403
         assert client.get("http://192.168.4.93:8080/api/health").status_code == 403
         assert client.get("/api/state").status_code == 401
-        reply = client.post("/", data={"password": password}, headers={"Origin": lan}, follow_redirects=False)
-        assert reply.status_code == 303
+        login = client.post("/", data={"password": password}, headers={"Origin": lan}, follow_redirects=False)
+        assert login.status_code == 303 and "secure" not in login.headers["set-cookie"].lower()
         assert client.get("/api/state").status_code == 200
+        assert client.get(public + "/api/state", headers={"Cookie": login.headers["set-cookie"].split(";")[0]}).status_code == 401
         with client.websocket_connect("ws://192.168.4.93:17866/ws", headers={"Origin": lan}) as socket:
             assert "channels" in socket.receive_json()
+        public_login = client.post(public + "/", data={"password": password},
+                                   headers={"Origin": public}, follow_redirects=False)
+        assert public_login.status_code == 303 and "secure" in public_login.headers["set-cookie"].lower()
+        assert client.get(public + "/api/state").status_code == 200
+
+
+def test_server_bind_depends_only_on_web_password(monkeypatch):
+    from blynx.server import dashboard_bind
+
+    monkeypatch.setenv("BLYNX_SERVER_MODE", "1")
+    monkeypatch.setenv("BLYNX_LAN_IP", "192.168.255.254")
+    monkeypatch.setenv("BLYNX_LAN_PASSWORD", "old")
+    monkeypatch.delenv("BLYNX_WEB_PASSWORD", raising=False)
+    assert dashboard_bind() == "127.0.0.1"
+    monkeypatch.setenv("BLYNX_WEB_PASSWORD", "shared-test-password-32-characters")
+    assert dashboard_bind() == "0.0.0.0"
+    monkeypatch.delenv("BLYNX_SERVER_MODE")
+    assert dashboard_bind() == "127.0.0.1"

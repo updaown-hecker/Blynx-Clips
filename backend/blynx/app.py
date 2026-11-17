@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 from .engine import Engine, public_error
 from .media import run
 from .platforms import PlatformError, Twitch, YouTube, write_secret
-from .server import lan_ip, private_ipv4
+from .server import dashboard_bind, private_ipv4
 from .store import Settings, Store
 from .tab_capture import save_tab_capture
 
@@ -30,20 +30,15 @@ HOST = urlsplit(ORIGIN).netloc
 PUBLIC_ORIGIN = os.getenv("BLYNX_PUBLIC_ORIGIN", "").strip().rstrip("/")
 PUBLIC_HOST = urlsplit(PUBLIC_ORIGIN).netloc
 WEB_PASSWORD = os.getenv("BLYNX_WEB_PASSWORD", "")
-LAN_ADDRESS = lan_ip()
+LAN_ENABLED = dashboard_bind() == "0.0.0.0"
 LAN_PORT = os.getenv("BLYNX_PORT", "17865")
-LAN_HOST = f"{LAN_ADDRESS}:{LAN_PORT}" if LAN_ADDRESS else ""
-LAN_ORIGIN = f"http://{LAN_HOST}" if LAN_HOST else ""
-LAN_PASSWORD = os.getenv("BLYNX_LAN_PASSWORD", "")
 if PUBLIC_ORIGIN:
     parts = urlsplit(PUBLIC_ORIGIN)
     if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
             or parts.path or parts.query or parts.fragment or PUBLIC_HOST == HOST):
         raise ValueError("BLYNX_PUBLIC_ORIGIN must be a separate HTTPS origin, without a path")
-    if len(WEB_PASSWORD) < 24:
-        raise ValueError("Set BLYNX_WEB_PASSWORD to a random password at least 24 characters long")
-if LAN_ORIGIN and (len(LAN_PASSWORD) < 24 or LAN_PASSWORD == WEB_PASSWORD):
-    raise ValueError("Set BLYNX_LAN_PASSWORD to a separate random password at least 24 characters long")
+if (PUBLIC_ORIGIN or WEB_PASSWORD) and len(WEB_PASSWORD) < 24:
+    raise ValueError("Set BLYNX_WEB_PASSWORD to a random password at least 24 characters long")
 COOKIE = "blynx_clips_server_session" if os.getenv("BLYNX_SERVER_MODE") == "1" else "blynx_clips_session"
 SESSION = secrets.token_urlsafe(32)
 
@@ -98,25 +93,15 @@ def safe_cookie(request: Request | WebSocket) -> bool:
     return hmac.compare_digest(request.cookies.get(COOKIE, "").encode(), session_token(origin).encode())
 
 
-def dashboard_password(origin: str) -> str:
-    if origin and origin not in (ORIGIN, PUBLIC_ORIGIN):
-        return LAN_PASSWORD
-    if PUBLIC_ORIGIN:
-        return WEB_PASSWORD
-    return LAN_PASSWORD if LAN_ORIGIN else ""
-
-
 def dashboard_origin(host: str) -> str:
     if host == HOST:
         return ORIGIN
     if PUBLIC_HOST and host == PUBLIC_HOST:
         return PUBLIC_ORIGIN
-    if LAN_ADDRESS == "0.0.0.0":
+    if LAN_ENABLED:
         address, _, port = host.partition(":")
         if port == LAN_PORT and private_ipv4(address):
             return f"http://{host}"
-    elif LAN_HOST and host == LAN_HOST:
-        return LAN_ORIGIN
     return ""
 
 
@@ -187,12 +172,12 @@ async def local(request: Request, next_call):
 
 @app.get("/")
 async def index(request: Request):
-    if (PUBLIC_ORIGIN or LAN_ORIGIN) and not safe_cookie(request):
+    if WEB_PASSWORD and not safe_cookie(request):
         return login_page()
     if not (FRONTEND / "index.html").is_file():
         return JSONResponse({"detail": "Frontend is missing. Run npm ci && npm run build in frontend."}, 503)
     response = FileResponse(FRONTEND / "index.html")
-    if not (PUBLIC_ORIGIN or LAN_ORIGIN):
+    if not WEB_PASSWORD:
         response.set_cookie(COOKIE, session_token(ORIGIN), httponly=True, samesite="strict")
     return response
 
@@ -200,8 +185,7 @@ async def index(request: Request):
 @app.post("/")
 async def dashboard_login(request: Request):
     origin = dashboard_origin(request.headers.get("host", ""))
-    password = dashboard_password(origin)
-    if not password:
+    if not WEB_PASSWORD:
         raise HTTPException(404)
     if request.headers.get("origin") != origin:
         raise HTTPException(403, "Use the dashboard sign-in page")
@@ -217,7 +201,7 @@ async def dashboard_login(request: Request):
     except ValueError:
         return login_page(invalid=True)
     supplied = params.get("password", [""])[0]
-    if not hmac.compare_digest(supplied.encode(), password.encode()):
+    if not hmac.compare_digest(supplied.encode(), WEB_PASSWORD.encode()):
         return login_page(invalid=True)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(COOKIE, session_token(origin), httponly=True, secure=origin == PUBLIC_ORIGIN, samesite="strict")

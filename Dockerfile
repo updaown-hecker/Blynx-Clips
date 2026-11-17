@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend /app/backend
 COPY --from=frontend /build/dist /app/frontend/dist
 ENV PYTHONPATH=/app/backend BLYNX_FRONTEND=/app/frontend/dist BLYNX_DATA_DIR=/data \
-    BLYNX_CREDENTIAL_DIR=/data/credentials BLYNX_SERVER_MODE=1
+    BLYNX_CREDENTIAL_DIR=/data/credentials BLYNX_SERVER_MODE=1 \
+    BLYNX_PORT=17866 BLYNX_LOCAL_ORIGIN=http://127.0.0.1:17866
 USER blynx
 CMD ["python", "-m", "blynx"]
