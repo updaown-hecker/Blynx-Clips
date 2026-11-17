@@ -33,7 +33,9 @@ def test_dashboard_opens_directly_and_enforces_same_origin(origin, tmp_path, mon
         assert (("Secure" in cookie) == origin.startswith("https://"))
         assert "HttpOnly" in cookie
         assert client.get("/api/state").status_code == 200
-        assert client.post("/", data={"password": "old"}).status_code == 405
+        old_form = client.post("/", data={"password": "old"}, follow_redirects=False)
+        assert old_form.status_code == 303 and old_form.headers["location"] == "/"
+        assert "Blynx Clips dashboard" in client.post("/", data={"password": "old"}).text
         assert client.get("/api/state", headers={"Host": "unconfigured.example.test"}).status_code == 403
         assert client.post("/api/monitor/stop", headers=headers | {"Origin": "https://wrong.test"}).status_code == 403
         assert client.post("/api/pair", headers=headers).status_code == 403

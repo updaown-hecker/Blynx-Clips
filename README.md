@@ -45,7 +45,7 @@ Automatic storage reclamation is optional. Set `BLYNX_SERVER_PRUNE=1` in `server
 
 In `server.env`, set `BLYNX_PUBLIC_ORIGIN=https://clips.blynx.vip` (or your chosen HTTPS hostname). Apply it with `docker compose --env-file server.env up -d`.
 
-On the Cloudflare tunnel, add a published route for the same hostname. Use **HTTP** with `127.0.0.1:17866` if cloudflared shares the CasaOS host network, or the server's LAN IP and port 17866 if cloudflared runs in a bridged container. Leave the HTTP Host Header override empty.
+On the Cloudflare tunnel, add a published route for the same hostname. Use **HTTP** with `127.0.0.1:17866` if cloudflared shares the CasaOS host network, or the server's LAN IP and port 17866 if cloudflared runs in a bridged container. The app expects the public hostname in the HTTP Host Header. Leave the override empty when your tunnel preserves it, or set the override to the public hostname itself, without a scheme or port.
 
 The dashboard opens directly. If you publish it outside your trusted network, configure access control at your tunnel or reverse proxy. Apply that control to the dashboard, API, media URLs, and WebSocket endpoint.
 

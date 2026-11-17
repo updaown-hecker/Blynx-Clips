@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
@@ -164,6 +164,12 @@ async def index(request: Request):
     response.set_cookie(COOKIE, session_token(origin), httponly=True,
                         secure=origin.startswith("https://"), samesite="strict")
     return response
+
+
+@app.post("/", include_in_schema=False)
+async def legacy_sign_in():
+    # Browsers can resubmit the former sign-in form when reloading an open tab.
+    return RedirectResponse("/", status_code=303)
 
 
 @app.exception_handler(RequestValidationError)
