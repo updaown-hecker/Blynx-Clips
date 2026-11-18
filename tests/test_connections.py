@@ -1,11 +1,14 @@
 import json
 import subprocess
+import time
+from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from blynx.app import ORIGIN, app
+from blynx.editor import stable_camera
 
 DASHBOARD = {"origin": ORIGIN, "x-blynx-local": "1"}
 EXTENSION = {"origin": "chrome-extension://blynx-test"}
@@ -156,3 +159,96 @@ def test_cut_clips_recover_older_exports_and_keep_new_downloads(tmp_path, monkey
         stream = json.loads(probe.stdout)["streams"][0]
         assert (stream["width"], stream["height"], float(stream["duration"])) == (1080, 1920, 2)
         assert client.get("/media/cut-clips/missing/download").status_code == 404
+
+
+def test_camera_detection_prefers_a_face_that_stays_in_a_corner():
+    camera = stable_camera([
+        [(0.84, 0.20, 0.08, 0.12), (0.51, 0.48, 0.16, 0.20)],
+        [(0.85, 0.21, 0.08, 0.12), (0.20, 0.14, 0.10, 0.15)],
+        [(0.83, 0.20, 0.08, 0.12)],
+        [],
+    ])
+    assert camera is not None
+    assert camera["x"] < 0.84 < camera["x"] + camera["width"]
+    assert camera["y"] < 0.20 < camera["y"] + camera["height"]
+    assert stable_camera([[(0.51, 0.48, 0.16, 0.20)]] * 8) is None
+
+
+def test_editor_analysis_export_and_video_preview(tmp_path, monkeypatch):
+    from blynx import editor, media
+
+    monkeypatch.setenv("BLYNX_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(editor, "detect_frames", lambda *_: {"x": 0, "y": 0, "width": 0.3, "height": 0.4})
+    real_run = media.run
+
+    async def run(*args, **kwargs):
+        if args[1:3] == ("-m", "blynx.captions"):
+            assert args[-1] == "--short-cues"
+            assert args[4] == str(tmp_path / "whisper")
+            Path(args[args.index("--output") + 1]).write_text('[[0.0,0.9,"Before trim"],[1.1,2.1,"Edited words"]]')
+            return b"Unrelated native library output"
+        return await real_run(*args, **kwargs)
+
+    monkeypatch.setattr(media, "run", run)
+
+    def finish(client, response):
+        assert response.status_code == 202, response.text
+        job_id = response.json()["job"]
+        for _ in range(300):
+            state = client.get(f"/api/editor-jobs/{job_id}").json()
+            assert state["status"] != "error", state
+            if state["status"] == "done":
+                return state["result"]
+            time.sleep(0.05)
+        pytest.fail("Editor job timed out")
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        assert client.get("/").status_code == 200
+        folder = tmp_path / "clips"
+        folder.mkdir(exist_ok=True)
+        original = folder / "highlight.mp4"
+        source = folder / "highlight.source.mp4"
+        subprocess.run([
+            "ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+            "color=blue:size=320x180:rate=12,drawbox=0:0:96:72:red:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440", "-t", "3",
+            "-c:v", "libx264", "-threads", "2", "-c:a", "aac", str(source)
+        ], check=True)
+        original.write_bytes(b"Already rendered highlight")
+        client.portal.call(app.state.engine.store.execute, """
+            INSERT INTO clip(id,channel,name,platform,broadcast,source,onset,score,offset,status,path,duration)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("edit", "Streamer", "Sample", "Twitch", "live", "", 1, 0, 0, "ready", str(original), 3))
+        assert client.get("/media/edit/editor-source").content == source.read_bytes()
+        assert client.get("/media/edit/download").content == original.read_bytes()
+        analysis = finish(client, client.post("/api/clips/edit/editor-analysis", headers=DASHBOARD))
+        assert len(analysis["cues"]) == 2
+        assert not analysis["caption_error"]
+        assert analysis["camera"]["width"] == 0.3
+        endpoint = "/api/clips/edit/editor-export"
+        bad = client.post(endpoint, headers=DASHBOARD, json={"start": 1, "end": 3, "layout": "camera-top"})
+        assert bad.status_code == 422
+        edited = finish(client, client.post(endpoint, headers=DASHBOARD, json={
+            "start": 1, "end": 3, "layout": "camera-top", "camera": analysis["camera"],
+            "caption_style": "pop", "cues": analysis["cues"]
+        }))
+        video_url = f"/media/cut-clips/{edited['id']}"
+        preview = client.get(video_url + "/video", headers={"range": "bytes=0-511"})
+        assert preview.status_code == 206
+        download = client.get(video_url + "/download")
+        assert download.headers["content-disposition"].startswith("attachment;")
+        path = tmp_path / "result.mp4"
+        path.write_bytes(download.content)
+        pixels = subprocess.run([
+            "ffmpeg", "-v", "error", "-ss", "0.5", "-i", str(path), "-frames:v", "1",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-threads", "1", "pipe:1"
+        ], capture_output=True, check=True).stdout
+        assert len(pixels) == 1080 * 1920 * 3
+        top = (320 * 1080 + 540) * 3
+        bottom = (960 * 1080 + 540) * 3
+        assert pixels[top] > 200 and pixels[top + 2] < 40
+        assert pixels[bottom] < 40 and pixels[bottom + 2] > 200
+        assert any(pixels[i] > 180 and pixels[i + 1] > 150 and pixels[i + 2] < 60
+                   for i in range(1450 * 1080 * 3, 1770 * 1080 * 3, 3))
+        assert client.get("/api/cut-clips").json()[0]["id"] == edited["id"]
+        assert source.is_file() and original.is_file()

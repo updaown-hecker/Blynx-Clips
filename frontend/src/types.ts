@@ -34,8 +34,8 @@ export type Analytics = {
   groups: {channel: string; clips: number; bytes: number}[]
   peaks: Pick<Clip,"id"|"name"|"channel"|"onset"|"score"|"scoreVersion"|"status">[]
 }
-export async function api<T>(path: string, method = "GET", value?: unknown): Promise<T> {
-  const response = await fetch("/api/" + path, {method, headers: {"Content-Type":"application/json","X-Blynx-Local":"1"},
+export async function api<T>(path: string, method = "GET", value?: unknown, signal?: AbortSignal): Promise<T> {
+  const response = await fetch("/api/" + path, {method, signal, headers: {"Content-Type":"application/json","X-Blynx-Local":"1"},
     body: value === undefined ? undefined : JSON.stringify(value)})
   const data = await response.json()
   if (!response.ok) throw Error(typeof data.detail === "string" ? data.detail :

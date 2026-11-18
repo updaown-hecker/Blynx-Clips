@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
     && install -d -m 0700 -o blynx -g blynx /data /data/credentials
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt "faster-whisper>=1.1,<2"
+RUN pip install --no-cache-dir -r requirements.txt
 COPY backend /app/backend
 COPY --from=frontend /build/dist /app/frontend/dist
 ENV PYTHONPATH=/app/backend BLYNX_FRONTEND=/app/frontend/dist BLYNX_DATA_DIR=/data \

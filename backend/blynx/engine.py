@@ -16,7 +16,7 @@ import psutil
 
 from .anonymous_twitch import AnonymousTwitch
 from .detector import Aggregator, Bucket, Detection, Detector, Event
-from .media import Recorder, assemble, bounds, run
+from .media import Recorder, assemble, bounds, full_frame_path, run
 from .platforms import Live, PlatformError, Twitch, YouTube, parse_url, read_secret
 from .spikes import WindowDetector
 from .store import Settings, Store
@@ -253,9 +253,11 @@ class Engine:
                     tracks = {s["codec_type"] for s in metadata["streams"]}
                     if not {"video", "audio"}.issubset(tracks) or not 0 < duration <= data["maximum"]:
                         raise RuntimeError
+                    path = Path(row["path"])
+                    source = full_frame_path(path)
                     self.ready(row["id"], event, {"duration": duration, "partial": True,
-                               "bytes": Path(row["path"]).stat().st_size,
-                               "thumbnail": Path(row["path"]).with_suffix(".jpg").exists()})
+                               "bytes": path.stat().st_size + (source.stat().st_size if source.is_file() else 0),
+                               "thumbnail": path.with_suffix(".jpg").exists()})
                 else:
                     await self.finalize(recorder, Job(event, row["id"], Path(row["path"])), data)
             except Exception:
@@ -317,6 +319,7 @@ class Engine:
                 continue
             try:
                 path.with_suffix(".jpg").unlink(missing_ok=True)
+                full_frame_path(path).unlink(missing_ok=True)
                 path.unlink(missing_ok=True)
             except OSError:
                 continue

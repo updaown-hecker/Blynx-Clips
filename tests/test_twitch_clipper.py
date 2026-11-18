@@ -1,6 +1,7 @@
 import asyncio
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -110,7 +111,8 @@ def test_credited_vertical_clip_processes_transcript_and_renders_mp4(tmp_path, m
 
     async def fake_whisper(*args, **kwargs):
         if args[1:3] == ("-m", "blynx.captions"):
-            return b'[[0.25,1.5,"This is a caption"]]'
+            Path(args[args.index("--output") + 1]).write_text('[[0.25,1.5,"This is a caption"]]')
+            return b""
         return await run(*args, **kwargs)
 
     monkeypatch.setattr(media, "run", fake_whisper)
@@ -128,5 +130,10 @@ def test_credited_vertical_clip_processes_transcript_and_renders_mp4(tmp_path, m
         video = next(stream for stream in data["streams"] if stream["codec_type"] == "video")
         assert (video["width"], video["height"]) == (720, 1280)
         assert {stream["codec_type"] for stream in data["streams"]} == {"video", "audio"}
+        edit_source = media.full_frame_path(target)
+        clean = json.loads(await run("ffprobe", "-v", "error", "-select_streams", "v:0",
+                                     "-show_entries", "stream=width,height", "-of", "json", str(edit_source)))
+        assert clean["streams"] == [{"width": 320, "height": 180}]
+        assert result["bytes"] == target.stat().st_size + edit_source.stat().st_size
 
     asyncio.run(scenario())

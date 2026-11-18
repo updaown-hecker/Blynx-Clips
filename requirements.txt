@@ -7,4 +7,6 @@ grpcio>=1.70,<2
 protobuf>=5,<8
 keyring>=25,<27
 psutil>=6,<8
+faster-whisper>=1.1,<2
+opencv-python-headless>=4.10,<5
 

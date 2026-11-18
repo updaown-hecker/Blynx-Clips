@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import json
+import logging
 import os
 import signal
 import sys
@@ -54,6 +55,20 @@ async def halt(proc: asyncio.subprocess.Process | None, grace: float = 4) -> Non
         if proc.returncode is None:
             proc.kill()
         await proc.wait()
+
+
+def full_frame_path(clip: Path) -> Path:
+    return clip.with_suffix(".source.mp4")
+
+
+async def transcribe_audio(audio: Path, model_cache: Path, *, short_cues: bool = False) -> list:
+    result = audio.with_suffix(".json")
+    args = [sys.executable, "-m", "blynx.captions", str(audio), str(model_cache.absolute()),
+            "--output", str(result)]
+    if short_cues:
+        args.append("--short-cues")
+    await run(*args, timeout=600 if short_cues else 300)
+    return json.loads(result.read_text(encoding="utf-8"))
 
 
 class Recorder:
@@ -165,6 +180,8 @@ async def assemble(segments: list[Segment], start: float, end: float, target: Pa
         raise RuntimeError("Less than one second of video overlaps this event")
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".partial.mp4")
+    full_frame = full_frame_path(target)
+    full_frame_temp = full_frame.with_suffix(".partial.mp4")
     manifest = selected[0].path.parent / f"{target.stem}.concat"
     manifest.write_text("".join(f"file '{item.path.name}'\n" for item in selected))
     try:
@@ -187,8 +204,7 @@ async def assemble(segments: list[Segment], start: float, end: float, target: Pa
                     audio = location / "audio.wav"
                     try:
                         await run(*arguments, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(audio))
-                        transcript = json.loads(await run(sys.executable, "-m", "blynx.captions",
-                                                          str(audio), str(model_cache.absolute()), timeout=300))
+                        transcript = await transcribe_audio(audio, model_cache)
                     except (OSError, RuntimeError, TimeoutError, ValueError):
                         caption_failed = True
                 write_ass(location / "captions.ass", credit, duration, transcript)
@@ -212,6 +228,13 @@ async def assemble(segments: list[Segment], start: float, end: float, target: Pa
             raise RuntimeError("Clip verification failed: audio or video is missing")
         if not 0 < duration <= maximum:
             raise RuntimeError("Clip verification failed: duration exceeds configured maximum")
+        if credit:
+            try:
+                await run(*arguments, *tracks, *encoding, "-c:a", "aac",
+                          "-movflags", "+faststart", str(full_frame_temp.absolute()))
+                full_frame_temp.replace(full_frame)
+            except (OSError, RuntimeError, TimeoutError):
+                logging.getLogger("blynx").warning("Could not keep full-frame editor footage", exc_info=True)
         temporary.replace(target)
         thumbnail = target.with_suffix(".jpg")
         try:
@@ -219,10 +242,12 @@ async def assemble(segments: list[Segment], start: float, end: float, target: Pa
                       "-i", str(target), "-vf", "scale=640:-2", "-frames:v", "1", str(thumbnail), timeout=15)
         except RuntimeError:
             thumbnail.unlink(missing_ok=True)
-        return {"duration": duration, "bytes": target.stat().st_size,
+        return {"duration": duration,
+                "bytes": target.stat().st_size + (full_frame.stat().st_size if full_frame.is_file() else 0),
                 "partial": earliest - start > 1 or end - latest > 1, "thumbnail": thumbnail.exists(),
                 "caption_failed": caption_failed}
     finally:
         manifest.unlink(missing_ok=True)
         temporary.unlink(missing_ok=True)
+        full_frame_temp.unlink(missing_ok=True)
 

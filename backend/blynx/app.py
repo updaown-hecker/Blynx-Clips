@@ -17,8 +17,9 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
+from . import editor
 from .engine import Engine, public_error
-from .media import run
+from .media import full_frame_path, run
 from .platforms import PlatformError, Twitch, YouTube, write_secret
 from .server import dashboard_bind, private_ipv4
 from .store import Settings, Store
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
     engine = Engine(store)
     await engine.load_credentials()
     app.state.engine = engine
+    app.state.editor_jobs = editor.EditorJobs()
     app.state.pair_code = ("", 0.0)
     supervisor = asyncio.create_task(engine.supervisor())
     app.state.supervisor = supervisor
@@ -67,6 +69,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await app.state.editor_jobs.close()
         await engine.shutdown()
         try:
             await asyncio.wait_for(asyncio.gather(supervisor, return_exceptions=True), timeout=20)
@@ -515,6 +518,7 @@ async def delete_clip(key: str):
     if path.is_file():
         path.unlink()
         path.with_suffix(".jpg").unlink(missing_ok=True)
+    full_frame_path(path).unlink(missing_ok=True)
     app.state.engine.store.execute("DELETE FROM clip WHERE id=?", (key,))
     return {"ok": True}
 
@@ -522,9 +526,11 @@ async def delete_clip(key: str):
 @app.get("/media/{key}/{asset}")
 async def media(key: str, asset: str):
     original = clip(key)
-    if original["status"] != "ready" or asset not in {"video", "thumbnail", "download"}:
+    if original["status"] != "ready" or asset not in {"video", "thumbnail", "download", "editor-source"}:
         raise HTTPException(404, "Media unavailable")
     path = Path(original["path"]).with_suffix(".jpg" if asset == "thumbnail" else ".mp4")
+    if asset == "editor-source":
+        path = editor_source(path)
     if not path.is_file():
         raise HTTPException(404, "File is missing")
     return FileResponse(path, filename=path.name if asset == "download" else None)
@@ -549,31 +555,63 @@ async def cut_clips():
             for row in rows if Path(row["path"]).is_file()]
 
 
-@app.get("/media/cut-clips/{key}/download")
-async def download_cut_clip(key: str):
+@app.get("/media/cut-clips/{key}/{asset}")
+async def cut_media(key: str, asset: str):
     row = app.state.engine.store.item("SELECT path FROM cut_clip WHERE id=?", (key,))
-    if row:
+    if row and asset in {"video", "download"}:
         path = Path(row["path"])
         if path.is_file():
-            return FileResponse(path, media_type="video/mp4", filename=path.name)
+            return FileResponse(path, media_type="video/mp4", filename=path.name if asset == "download" else None)
     raise HTTPException(404, "Cut clip is unavailable")
+
+
+def ready_clip(key: str) -> tuple[dict, Path]:
+    original = clip(key)
+    source = Path(original["path"])
+    if original["status"] != "ready" or not source.is_file():
+        raise HTTPException(404, "Clip is unavailable")
+    return original, source
+
+
+def editor_source(path: Path) -> Path:
+    full_frame = full_frame_path(path)
+    return full_frame if full_frame.is_file() else path
+
+
+def export_paths(engine: Engine, source: Path, preset: str) -> tuple[str, Path, Path]:
+    folder = engine.store.clips_dir() / "exports"
+    folder.mkdir(parents=True, exist_ok=True)
+    cut_id = secrets.token_hex(16)
+    target = folder / f"{source.stem}_{preset}_{cut_id}.mp4"
+    return cut_id, target, target.with_suffix(".partial.mp4")
+
+
+def save_export(engine: Engine, original: dict, cut_id: str, target: Path, temp: Path,
+                preset: str, duration: float) -> dict:
+    size = temp.stat().st_size
+    if not size:
+        raise RuntimeError("FFmpeg produced an empty export")
+    temp.replace(target)
+    try:
+        with engine.store.db:
+            engine.store.db.execute("INSERT INTO cut_clip VALUES(?,?,?,?,?,?,?,?)",
+                                    (cut_id, str(target), original["name"], original["channel"],
+                                     preset, time.time(), duration, size))
+            engine.store.db.execute("UPDATE clip SET review='Exported' WHERE id=?", (original["id"],))
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    return {"id": cut_id, "path": str(target)}
 
 
 @app.post("/api/clips/{key}/export")
 async def export_clip(key: str, body: Export):
-    original = clip(key)
+    original, source = ready_clip(key)
     engine: Engine = app.state.engine
-    source = Path(original["path"])
-    if original["status"] != "ready" or not source.is_file():
-        raise HTTPException(404, "Clip is unavailable")
     end = min(body.end or original["duration"], original["duration"])
     if end - body.start < 1:
         raise HTTPException(422, "Trim range exceeds clip duration")
-    folder = engine.store.clips_dir() / "exports"
-    folder.mkdir(parents=True, exist_ok=True)
-    cut_id = secrets.token_hex(16)
-    target = folder / f"{source.stem}_{body.preset}_{cut_id}.mp4"
-    temp = target.with_suffix(".partial.mp4")
+    cut_id, target, temp = export_paths(engine, source, body.preset)
     args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
             "-ss", str(body.start), "-t", str(end - body.start), "-map", "0:v:0", "-map", "0:a:0?"]
     if body.preset == "vertical":
@@ -582,25 +620,63 @@ async def export_clip(key: str, body: Export):
         async with engine.encode:
             await run(*args, "-c:v", "libx264", "-preset", "veryfast", "-threads", "2", "-c:a", "aac",
                       "-movflags", "+faststart", str(temp))
-        size = temp.stat().st_size
-        if not size:
-            raise RuntimeError("FFmpeg produced an empty export")
-        temp.replace(target)
-        try:
-            with engine.store.db:
-                engine.store.db.execute("INSERT INTO cut_clip VALUES(?,?,?,?,?,?,?,?)",
-                                        (cut_id, str(target), original["name"], original["channel"],
-                                         body.preset, time.time(), end - body.start, size))
-                engine.store.db.execute("UPDATE clip SET review='Exported' WHERE id=?", (key,))
-        except Exception:
-            target.unlink(missing_ok=True)
-            raise
+        return save_export(engine, original, cut_id, target, temp, body.preset, end - body.start)
     except Exception:
         logging.getLogger("blynx").exception("Could not save cut clip")
         raise HTTPException(500, "Could not save cut clip") from None
     finally:
         temp.unlink(missing_ok=True)
-    return {"id": cut_id, "path": str(target)}
+
+
+def submit_editor_job(operation) -> dict:
+    try:
+        return {"job": app.state.editor_jobs.submit(operation)}
+    except ValueError as exc:
+        raise HTTPException(429, str(exc)) from None
+
+
+@app.get("/api/editor-jobs/{key}")
+async def editor_status(key: str):
+    state = app.state.editor_jobs.states.get(key)
+    if state is None:
+        raise HTTPException(404, "Editor job expired. Open the clip and try again.")
+    return state
+
+
+@app.post("/api/clips/{key}/editor-analysis", status_code=202)
+async def editor_analysis(key: str):
+    original, source = ready_clip(key)
+    source = editor_source(source)
+    root = app.state.engine.store.root
+
+    async def analyze(progress):
+        return await editor.analyze(source, original["duration"], root, progress)
+
+    return submit_editor_job(analyze)
+
+
+@app.post("/api/clips/{key}/editor-export", status_code=202)
+async def editor_export(key: str, body: editor.ShortEdit):
+    original, source = ready_clip(key)
+    engine: Engine = app.state.engine
+    edit_source = editor_source(source)
+    end = min(body.end, original["duration"])
+    if end - body.start < 1:
+        raise HTTPException(422, "Trim range exceeds clip duration")
+
+    async def render(progress):
+        progress("Rendering 1080 × 1920 MP4", None)
+        cut_id, target, temp = export_paths(engine, source, "vertical")
+        try:
+            async with engine.encode:
+                credit = original["channel"] if original["platform"] == "Twitch" else ""
+                await editor.render(edit_source, temp, body, end, credit)
+            saved = save_export(engine, original, cut_id, target, temp, "vertical", end - body.start)
+            return {"id": saved["id"]}
+        finally:
+            temp.unlink(missing_ok=True)
+
+    return submit_editor_job(render)
 
 
 @app.post("/api/clips/{key}/location")

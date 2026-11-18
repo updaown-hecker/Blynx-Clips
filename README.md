@@ -89,7 +89,9 @@ Default clips use up to 20 seconds of pre-roll and 20 seconds after recovery, wi
 
 ## Editing and export
 
-In **Highlights**, open a clip to play, rename, favorite, mark for review, copy the source link, or download. Set start and end times to export a trim. **1080×1920 center crop** creates a vertical MP4 and retains the recorded audio. The **Original aspect** preset preserves the horizontal layout. Both go into the exports folder under the clip output directory. Import the MP4 into the editor of your choice. Confirm rights to republish the footage before uploading.
+Open **Cut Clips** and select a highlight, or open a highlight and choose **Open in Cut Clips**. Use the timeline to preview and trim it. The 9:16 layouts can fill the frame, fit the full video, or stack the camera and video in either order. The editor looks for a stable face near the edge of the source. Use **Draw crop** to select the webcam manually when needed.
+
+Whisper generates editable captions automatically. The first use downloads its model to the app data directory. Pick a style and choose **Export short** to save a 1080×1920 MP4. Play or download it under **Finished cuts**. **Quick trim** in Highlights also supports the original aspect ratio. New automatic Twitch vertical highlights keep a clean, full-frame copy for the editor, which adds to their storage use. Older exports can only be edited using the framing and text already in the saved video. Confirm rights to republish the footage before uploading.
 
 ## Chrome companion
 
