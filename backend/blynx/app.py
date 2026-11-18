@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -578,16 +579,59 @@ def editor_source(path: Path) -> Path:
     return full_frame if full_frame.is_file() else path
 
 
+async def ready_cut(key: str) -> tuple[dict, Path]:
+    cut = app.state.engine.store.item("SELECT * FROM cut_clip WHERE id=?", (key,))
+    if not cut or not (source := Path(cut["path"])).is_file():
+        raise HTTPException(404, "Cut clip is unavailable")
+    if cut["duration"] is None:
+        try:
+            duration = float(await run("ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                       "-of", "csv=p=0", str(source), timeout=10))
+        except (ValueError, RuntimeError, OSError, TimeoutError):
+            raise HTTPException(422, "Could not read this cut clip") from None
+        app.state.engine.store.execute("UPDATE cut_clip SET duration=? WHERE id=?", (duration, key))
+        cut["duration"] = duration
+    return cut, source
+
+
+@app.get("/api/cut-clips/{key}/edit")
+async def open_cut_edit(key: str):
+    cut, _ = await ready_cut(key)
+    saved = app.state.engine.store.item("SELECT * FROM cut_edit WHERE cut_id=?", (key,))
+    if saved:
+        source_kind = saved["source_kind"]
+        try:
+            source, _ = (ready_clip(saved["source_id"]) if source_kind == "clip"
+                         else await ready_cut(saved["source_id"]))
+        except HTTPException:
+            pass
+        else:
+            return cut_editor_payload(source, source_kind, json.loads(saved["recipe"]))
+    return cut_editor_payload(cut, "cut")
+
+
+def cut_editor_payload(source: dict, kind: str, recipe: dict | None = None) -> dict:
+    if source["duration"] < 1:
+        raise HTTPException(422, "The editor requires at least one second of video")
+    return {
+        "source": {"id": source["id"], "kind": kind, "name": source["name"], "channel": source["channel"],
+                   "platform": source.get("platform", ""), "duration": source["duration"]},
+        "recipe": recipe,
+    }
+
+
 def export_paths(engine: Engine, source: Path, preset: str) -> tuple[str, Path, Path]:
     folder = engine.store.clips_dir() / "exports"
     folder.mkdir(parents=True, exist_ok=True)
     cut_id = secrets.token_hex(16)
-    target = folder / f"{source.stem}_{preset}_{cut_id}.mp4"
+    stem = source.stem.encode()[:150].decode(errors="ignore")
+    target = folder / f"{stem}_{preset}_{cut_id}.mp4"
     return cut_id, target, target.with_suffix(".partial.mp4")
 
 
 def save_export(engine: Engine, original: dict, cut_id: str, target: Path, temp: Path,
-                preset: str, duration: float) -> dict:
+                preset: str, duration: float, *, source_kind: str = "clip",
+                recipe: editor.ShortEdit | None = None) -> dict:
     size = temp.stat().st_size
     if not size:
         raise RuntimeError("FFmpeg produced an empty export")
@@ -597,7 +641,11 @@ def save_export(engine: Engine, original: dict, cut_id: str, target: Path, temp:
             engine.store.db.execute("INSERT INTO cut_clip VALUES(?,?,?,?,?,?,?,?)",
                                     (cut_id, str(target), original["name"], original["channel"],
                                      preset, time.time(), duration, size))
-            engine.store.db.execute("UPDATE clip SET review='Exported' WHERE id=?", (original["id"],))
+            if source_kind == "clip":
+                engine.store.db.execute("UPDATE clip SET review='Exported' WHERE id=?", (original["id"],))
+            if recipe is not None:
+                engine.store.db.execute("INSERT INTO cut_edit VALUES(?,?,?,?)",
+                                        (cut_id, source_kind, original["id"], recipe.model_dump_json()))
     except Exception:
         target.unlink(missing_ok=True)
         raise
@@ -643,10 +691,7 @@ async def editor_status(key: str):
     return state
 
 
-@app.post("/api/clips/{key}/editor-analysis", status_code=202)
-async def editor_analysis(key: str):
-    original, source = ready_clip(key)
-    source = editor_source(source)
+def queue_editor_analysis(original: dict, source: Path) -> dict:
     root = app.state.engine.store.root
 
     async def analyze(progress):
@@ -655,11 +700,33 @@ async def editor_analysis(key: str):
     return submit_editor_job(analyze)
 
 
+@app.post("/api/clips/{key}/editor-analysis", status_code=202)
+async def editor_analysis(key: str):
+    original, source = ready_clip(key)
+    return queue_editor_analysis(original, editor_source(source))
+
+
+@app.post("/api/cut-clips/{key}/editor-analysis", status_code=202)
+async def cut_editor_analysis(key: str):
+    original, source = await ready_cut(key)
+    return queue_editor_analysis(original, source)
+
+
 @app.post("/api/clips/{key}/editor-export", status_code=202)
 async def editor_export(key: str, body: editor.ShortEdit):
     original, source = ready_clip(key)
+    return queue_editor_export(original, source, editor_source(source), body, "clip")
+
+
+@app.post("/api/cut-clips/{key}/editor-export", status_code=202)
+async def cut_editor_export(key: str, body: editor.ShortEdit):
+    original, source = await ready_cut(key)
+    return queue_editor_export(original, source, source, body, "cut")
+
+
+def queue_editor_export(original: dict, source: Path, edit_source: Path,
+                        body: editor.ShortEdit, source_kind: str) -> dict:
     engine: Engine = app.state.engine
-    edit_source = editor_source(source)
     end = min(body.end, original["duration"])
     if end - body.start < 1:
         raise HTTPException(422, "Trim range exceeds clip duration")
@@ -669,9 +736,11 @@ async def editor_export(key: str, body: editor.ShortEdit):
         cut_id, target, temp = export_paths(engine, source, "vertical")
         try:
             async with engine.encode:
-                credit = original["channel"] if original["platform"] == "Twitch" else ""
+                credit = original["channel"] if original.get("platform") == "Twitch" else ""
                 await editor.render(edit_source, temp, body, end, credit)
-            saved = save_export(engine, original, cut_id, target, temp, "vertical", end - body.start)
+            recipe = body.model_copy(update={"end": end})
+            saved = save_export(engine, original, cut_id, target, temp, "vertical", end - body.start,
+                                source_kind=source_kind, recipe=recipe)
             return {"id": saved["id"]}
         finally:
             temp.unlink(missing_ok=True)

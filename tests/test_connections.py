@@ -128,6 +128,10 @@ def test_cut_clips_recover_older_exports_and_keep_new_downloads(tmp_path, monkey
         assert len(cuts) == 1
         legacy_download = client.get(f"/media/cut-clips/{cuts[0]['id']}/download")
         assert legacy_download.content == legacy.read_bytes()
+        legacy_edit = client.get(f"/api/cut-clips/{cuts[0]['id']}/edit").json()
+        assert legacy_edit["source"]["kind"] == "cut"
+        assert legacy_edit["source"]["duration"] == 4
+        assert legacy_edit["recipe"] is None
 
         client.portal.call(app.state.engine.store.execute, """
             INSERT INTO clip(id,channel,name,platform,broadcast,source,onset,score,offset,status,path,duration)
@@ -252,3 +256,26 @@ def test_editor_analysis_export_and_video_preview(tmp_path, monkeypatch):
                    for i in range(1450 * 1080 * 3, 1770 * 1080 * 3, 3))
         assert client.get("/api/cut-clips").json()[0]["id"] == edited["id"]
         assert source.is_file() and original.is_file()
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        client.get("/")
+        cut_endpoint = f"/api/cut-clips/{edited['id']}"
+        reopened = client.get(cut_endpoint + "/edit").json()
+        assert reopened["source"]["kind"] == "clip"
+        assert reopened["source"]["id"] == "edit"
+        assert reopened["recipe"] == {"start": 1, "end": 3, "layout": "camera-top",
+                                      "camera": analysis["camera"], "caption_style": "pop", "cues": analysis["cues"]}
+        recipe = reopened["recipe"] | {"layout": "camera-bottom", "caption_style": "boxed"}
+        recipe["cues"] = [*recipe["cues"][:-1], recipe["cues"][-1] | {"text": "Updated caption"}]
+        revision = finish(client, client.post(endpoint, headers=DASHBOARD, json=recipe))
+        assert revision["id"] != edited["id"]
+        assert client.get(video_url + "/download").content == download.content
+        updated = client.get(f"/api/cut-clips/{revision['id']}/edit").json()
+        assert updated["recipe"] == recipe
+        original.unlink()
+        fallback = client.get(cut_endpoint + "/edit").json()
+        assert fallback["source"]["id"] == edited["id"]
+        assert fallback["source"]["kind"] == "cut" and fallback["recipe"] is None
+        assert finish(client, client.post(cut_endpoint + "/editor-export", headers=DASHBOARD, json={
+            "end": 1, "layout": "fit", "caption_style": "off"
+        }))["id"] != edited["id"]

@@ -82,6 +82,10 @@ class Store:
               channel TEXT NOT NULL, preset TEXT NOT NULL, created REAL NOT NULL,
               duration REAL, bytes INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS cut_edit (
+              cut_id TEXT PRIMARY KEY, source_kind TEXT NOT NULL, source_id TEXT NOT NULL,
+              recipe TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS quota (
               day TEXT NOT NULL, bucket TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(day,bucket)
             );

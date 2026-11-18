@@ -1,5 +1,5 @@
 .cut-workspace {display:grid;gap:16px}
-.short-source-picker {display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.short-source-picker {display:flex;flex-wrap:wrap;align-items:center;gap:10px;scroll-margin-top:76px}
 .short-source-picker select {flex:1 1 230px;max-width:480px}
 .short-field {color:var(--muted);font-size:12px}
 .short-editor {display:grid;grid-template-columns:minmax(240px,1fr) minmax(280px,380px);gap:1px;

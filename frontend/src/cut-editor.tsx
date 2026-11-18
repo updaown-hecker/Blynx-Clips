@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react"
-import { ArrowDownToLine, Captions, Clapperboard, Crop, Film, Pause, Play, ScanFace, Scissors, X } from "lucide-react"
+import { ArrowDownToLine, Captions, Clapperboard, Crop, Film, Pause, Pencil, Play, ScanFace, Scissors, X } from "lucide-react"
 import { Button } from "./button"
 import { api, type Clip, type CutClip } from "./types"
 import "./cut-editor.css"
@@ -14,6 +14,9 @@ const layouts = [
 type Layout = typeof layouts[number][0]
 const styles = [["clean","Clean"],["pop","Bold yellow"],["boxed","Boxed"],["off","Off"]] as const
 type CaptionStyle = typeof styles[number][0]
+type EditorSource = Pick<Clip,"id"|"name"|"channel"|"platform"|"duration"> & {kind:"clip"|"cut"}
+type Recipe = {start:number; end:number; layout:Layout; camera:Region|null; caption_style:CaptionStyle; cues:Cue[]}
+type SavedCutEdit = {source:EditorSource; recipe:Recipe|null}
 const videoRegion: Region = {x:0,y:0,width:1,height:1}
 const stamp = (seconds:number) => {
   const tenths = Math.round(Math.max(0, seconds) * 10)
@@ -64,27 +67,28 @@ export function CutDownload({id}: {id:string}) {
   </a></Button>
 }
 
-function ShortEditor({clip,onSaved}: {clip:Clip;onSaved:(id:string)=>void}) {
+function ShortEditor({clip,recipe,onSaved}: {clip:EditorSource;recipe?:Recipe|null;onSaved:()=>void}) {
   const video = useRef<HTMLVideoElement>(null)
   const phone = useRef<HTMLCanvasElement>(null)
   const source = useRef<HTMLCanvasElement>(null)
   const exportController = useRef<AbortController>(null)
   const dragStart = useRef<{x:number;y:number}|null>(null)
-  const manualCamera = useRef(false)
+  const manualCamera = useRef(Boolean(recipe?.camera))
   const maximum = Math.min(300, clip.duration)
-  const [start,setStart] = useState(0)
-  const [end,setEnd] = useState(maximum)
-  const [playhead,setPlayhead] = useState(0)
+  const endpoint = `${clip.kind==="cut"?"cut-clips":"clips"}/${clip.id}`
+  const [start,setStart] = useState(recipe?.start??0)
+  const [end,setEnd] = useState(recipe?.end??maximum)
+  const [playhead,setPlayhead] = useState(recipe?.start??0)
   const [playing,setPlaying] = useState(false)
   const [sourceRatio,setSourceRatio] = useState(16/9)
-  const [layout,setLayout] = useState<Layout>("fill")
-  const [captionStyle,setCaptionStyle] = useState<CaptionStyle>("clean")
-  const [camera,setCamera] = useState<Region|null>(null)
+  const [layout,setLayout] = useState<Layout>(recipe?.layout??(clip.kind==="cut"?"fit":"fill"))
+  const [captionStyle,setCaptionStyle] = useState<CaptionStyle>(recipe?.caption_style??(clip.kind==="cut"?"off":"clean"))
+  const [camera,setCamera] = useState<Region|null>(recipe?.camera??null)
   const [drawCrop,setDrawCrop] = useState(false)
   const [draft,setDraft] = useState<Region|null>(null)
-  const [cues,setCues] = useState<Cue[]>([])
+  const [cues,setCues] = useState<Cue[]>(recipe?.cues??[])
   const [activity,setActivity] = useState("Preparing clip analysis")
-  const [analysisDone,setAnalysisDone] = useState(false)
+  const [analysisDone,setAnalysisDone] = useState(Boolean(recipe))
   const [analysisError,setAnalysisError] = useState("")
   const [captionError,setCaptionError] = useState("")
   const [cameraError,setCameraError] = useState("")
@@ -95,6 +99,7 @@ function ShortEditor({clip,onSaved}: {clip:Clip;onSaved:(id:string)=>void}) {
   const [previewError,setPreviewError] = useState("")
 
   useEffect(()=>{
+    if (recipe && !analysisAttempt) return
     const controller = new AbortController()
     const {signal} = controller
     setAnalysisDone(false)
@@ -104,7 +109,7 @@ function ShortEditor({clip,onSaved}: {clip:Clip;onSaved:(id:string)=>void}) {
       if (!manualCamera.current && result.camera) setCamera(result.camera)
       setCameraError(result.camera_error)
     }
-    void api<{job:string}>(`clips/${clip.id}/editor-analysis`,"POST",undefined,signal)
+    void api<{job:string}>(endpoint+"/editor-analysis","POST",undefined,signal)
       .then(({job})=>watchJob<Analysis>(job,signal,state=>{
         setActivity(state.message)
         if (state.result) applyCamera(state.result)
@@ -120,7 +125,7 @@ function ShortEditor({clip,onSaved}: {clip:Clip;onSaved:(id:string)=>void}) {
         }
       })
     return ()=>controller.abort()
-  },[clip.id,analysisAttempt])
+  },[endpoint,recipe,analysisAttempt])
 
   useEffect(()=>()=>exportController.current?.abort(),[])
 
@@ -212,12 +217,11 @@ function ShortEditor({clip,onSaved}: {clip:Clip;onSaved:(id:string)=>void}) {
     setExportError("")
     setExportMessage("Sending edit to server")
     try {
-      const {job} = await api<{job:string}>(`clips/${clip.id}/editor-export`, "POST",
-        {start,end,layout,camera,caption_style:captionStyle,
-          cues:captionStyle==="off"?[]:cues.filter(cue=>cue.end>start && cue.start<end)},signal)
+      const {job} = await api<{job:string}>(endpoint+"/editor-export", "POST",
+        {start,end,layout,camera,caption_style:captionStyle,cues},signal)
       const result = await watchJob<{id:string}>(job,signal,state=>setExportMessage(state.message))
       setSaved(result.id)
-      onSaved(result.id)
+      onSaved()
     } catch (error) {
       if (!signal.aborted) setExportError((error as Error).message)
     } finally {
@@ -228,10 +232,12 @@ function ShortEditor({clip,onSaved}: {clip:Clip;onSaved:(id:string)=>void}) {
   const timelineStep = 0.01
 
   return <div className="short-editor">
-    <video ref={video} src={`/media/${clip.id}/editor-source`} preload="auto" playsInline className="short-source"
+    <video ref={video} src={clip.kind==="cut"?`/media/cut-clips/${clip.id}/video`:`/media/${clip.id}/editor-source`}
+      preload="auto" playsInline className="short-source"
       onLoadedMetadata={event=>{
         const media=event.currentTarget
         if (media.videoHeight) setSourceRatio(media.videoWidth/media.videoHeight)
+        if (start>0) media.currentTime=start
       }}
       onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)}
       onError={()=>setPreviewError("The browser could not load the source video.")}/>
@@ -302,7 +308,10 @@ function ShortEditor({clip,onSaved}: {clip:Clip;onSaved:(id:string)=>void}) {
           <p className="error" role="alert">{analysisError||captionError}</p>
           <Button onClick={()=>retryAnalysis(value=>value+1)}>Retry</Button>
         </div>}
-        {analysisDone&&!analysisError&&!captionError&&!cues.length&&<p className="secondary">No speech was detected.</p>}
+        {analysisDone&&!analysisError&&!captionError&&!cues.length&&
+          (recipe&&!analysisAttempt
+            ? <Button onClick={()=>retryAnalysis(value=>value+1)}>Generate captions</Button>
+            : <p className="secondary">No speech was detected.</p>)}
         {cues.length>0&&captionStyle!=="off"&&<details className="short-transcript">
           <summary>Edit caption text · {cues.length} cues</summary>
           <div>{cues.map((cue,index)=><label key={index} className="short-cue">
@@ -316,7 +325,7 @@ function ShortEditor({clip,onSaved}: {clip:Clip;onSaved:(id:string)=>void}) {
       </div>
       <div className="short-pane short-export">
         <Button variant="primary" onClick={()=>void exportCut()} disabled={!canRender||Boolean(exportMessage)}>
-          <Scissors size={16}/>{exportMessage||"Export short"}
+          <Scissors size={16}/>{exportMessage||(recipe!==undefined?"Save new version":"Export short")}
         </Button>
         {saved&&<CutDownload id={saved}/>}
         {exportError&&<p className="error" role="alert">{exportError}</p>}
@@ -355,6 +364,10 @@ export function CutClips({clips,selected,onSelect,openHighlights}: {
   const [error,setError]=useState("")
   const [attempt,reload]=useState(0)
   const [playing,setPlaying]=useState("")
+  const [editCut,setEditCut]=useState<CutClip>()
+  const [edit,setEdit]=useState<SavedCutEdit>()
+  const [editError,setEditError]=useState("")
+  const editorTop=useRef<HTMLDivElement>(null)
   const ready=clips.filter(clip=>clip.status==="ready"&&clip.duration>=1)
   const clip=ready.find(item=>item.id===selected)
   useEffect(()=>{
@@ -368,16 +381,58 @@ export function CutClips({clips,selected,onSelect,openHighlights}: {
     })
     return ()=>controller.abort()
   },[attempt])
+  useEffect(()=>{
+    if (!editCut) return
+    const controller=new AbortController()
+    const {signal}=controller
+    void api<SavedCutEdit>(`cut-clips/${editCut.id}/edit`,"GET",undefined,signal).then(result=>{
+      if (!signal.aborted) setEdit(result)
+    }).catch(error=>{
+      if (!signal.aborted) setEditError(error.message)
+    })
+    return ()=>controller.abort()
+  },[editCut])
+
+  const reopen=(cut:CutClip)=>{
+    if (cut.id!==editCut?.id || editError) {
+      setEdit(undefined)
+      setEditError("")
+      setEditCut({...cut})
+      setPlaying("")
+    }
+    editorTop.current?.focus({preventScroll:true})
+    editorTop.current?.scrollIntoView({block:"start"})
+  }
+  const leaveCut=()=>{
+    setEditCut(undefined)
+    setEdit(undefined)
+    setEditError("")
+  }
   return <div className="cut-workspace">
-    <div className="short-source-picker">
+    <div className="short-source-picker" ref={editorTop} tabIndex={-1}>
       <label className="short-field" htmlFor="short-source">Source highlight</label>
-      <select id="short-source" value={clip?.id??""} onChange={event=>onSelect(event.target.value)}>
+      <select id="short-source" value={editCut?"":clip?.id??""} onChange={event=>{
+        leaveCut()
+        onSelect(event.target.value)
+      }}>
         <option value="">{ready.length?"Choose a highlight":"No completed highlights"}</option>
         {ready.map(item=><option key={item.id} value={item.id}>{item.name} · {item.channel}</option>)}
       </select>
       <Button variant="ghost" onClick={openHighlights}>Browse Highlights</Button>
     </div>
-    {clip?<ShortEditor key={clip.id} clip={clip} onSaved={()=>reload(value=>value+1)}/>:
+    {editCut ? <>
+      <div className="section-head"><h2>Editing {editCut.name}</h2>
+        <Button variant="ghost" onClick={leaveCut}>Close edit</Button></div>
+      {editError&&<p className="error" role="alert">{editError}</p>}
+      {!edit&&!editError&&<p className="secondary" role="status">Opening saved cut…</p>}
+      {edit&&<>
+        {edit.source.kind==="cut"&&<p className="secondary">
+          This edit uses the exported video. Its existing captions and framing are baked in.
+        </p>}
+        <ShortEditor key={"edit-"+editCut.id} clip={edit.source} recipe={edit.recipe}
+          onSaved={()=>reload(value=>value+1)}/>
+      </>}
+    </>:clip?<ShortEditor key={clip.id} clip={{...clip,kind:"clip"}} onSaved={()=>reload(value=>value+1)}/>:
       <div className="empty"><div className="empty-icon"><Clapperboard/></div>
         <h3>Choose a highlight to edit</h3><p>Trim it, generate captions, and arrange it for a phone screen.</p></div>}
     <section className="panel finished-cuts" aria-label="Finished cuts">
@@ -396,6 +451,7 @@ export function CutClips({clips,selected,onSelect,openHighlights}: {
           <Button onClick={()=>setPlaying(playing===cut.id?"":cut.id)}>
             {playing===cut.id?<X size={15}/>:<Play size={15}/>} {playing===cut.id?"Close":"Preview"}
           </Button>
+          <Button onClick={()=>reopen(cut)}><Pencil size={15}/>Edit</Button>
           <CutDownload id={cut.id}/>
         </div>
         {playing===cut.id&&<video className="finished-preview" controls playsInline src={`/media/cut-clips/${cut.id}/video`}/>}
