@@ -60,7 +60,7 @@ function Graph({channel, onEvent}: {channel:Channel; onEvent:(id:string)=>void})
       <YAxis axisLine={false} tickLine={false} tick={{fill:"#9295a9",fontSize:10}}/>
       <Tooltip labelFormatter={label=>time(Number(label))} contentStyle={{background:"#1c1d2b",border:"1px solid #35364a",borderRadius:8,fontSize:12}}/>
       <Area type="monotone" name="Baseline" dataKey="baseline" fill="transparent" stroke="#575c80" strokeDasharray="4 5" isAnimationActive={false}/>
-      <Area type="monotone" name="Messages / 5s" dataKey="messages" fill={"url(#chart-" + channel.id + ")"} stroke="#9291ff" strokeWidth={2} isAnimationActive={false}/>
+      <Area type="monotone" name={`Messages / ${channel.chatWindow ?? 5}s`} dataKey="messages" fill={"url(#chart-" + channel.id + ")"} stroke="#9291ff" strokeWidth={2} isAnimationActive={false}/>
       {data.map((sample)=>sample.event && <ReferenceDot key={sample.event} x={sample.at} y={sample.messages} r={5} fill="#f5b460"
        stroke="#432d23" style={{cursor:"pointer"}} onClick={()=>onEvent(sample.event!)}/>)}
     </AreaChart></ResponsiveContainer></div>
@@ -79,7 +79,7 @@ function StreamCard({channel, clips, onEvent, task, detailed=false}: {channel:Ch
         <div className="grow"><h3>{channel.name}</h3><div className="secondary truncate" title={channel.live?.title}>{channel.live?.title ?? channel.platform}</div></div>
         {channel.live?.viewers != null && <span className="viewers"><Users size={13}/>{number.format(channel.live.viewers)}</span>}
       </div>
-      <div className="stream-stats"><div><small>Chat / 5s</small><b>{channel.raw5 ?? "—"}</b></div>
+      <div className="stream-stats"><div><small>Chat / {channel.chatWindow ?? 5}s</small><b>{(channel.chatWindow === 10 ? channel.raw10 : channel.raw5) ?? "—"}</b></div>
         <div><small>Baseline</small><b>{channel.baseline == null ? "—" : number.format(channel.baseline)}</b></div>
         <div><small>Spike score</small><b>{channel.score == null ? "—" : number.format(channel.score) + "/100"}</b></div>
         <div><small>Clips</small><b>{clips.filter(c=>c.channel===channel.name && c.status==="ready").length}</b></div></div>
@@ -93,10 +93,10 @@ function StreamCard({channel, clips, onEvent, task, detailed=false}: {channel:Ch
       </div>
       {detailed && <div className="detailed">
         <div>1s / 15s / 30s <b>{channel.mps ?? "—"} / {channel.raw15 ?? "—"} / {channel.raw30 ?? "—"}</b></div>
-        <div title="Earlier five-second windows with at least this much effective chat activity">Similar or busier windows
+        <div title={`Earlier ${channel.chatWindow ?? 5}-second windows with at least this much chat activity`}>Similar or busier windows
           <b>{(channel.comparedWindows ?? 0) < 12 ? "Collecting history" :
             channel.similarWindows + " of " + channel.comparedWindows}</b></div>
-        <div>Unique chatters (5s) <b>{channel.unique5 ?? "—"}</b></div><div>Acceleration <b>{channel.acceleration ?? "—"}</b></div>
+        {channel.chatWindow !== 10 && <div>Unique chatters (5s) <b>{channel.unique5 ?? "—"}</b></div>}<div>Acceleration <b>{channel.acceleration ?? "—"}</b></div>
         <div>Repeats / emotes (1s) <b>{channel.repeats ?? "—"} / {channel.emotes ?? "—"}</b></div>
         <div>Recording bitrate <b>{channel.bitrate ? number.format(channel.bitrate/1e6)+" Mbps" : "—"}</b></div>
         <div>Chat transport lag <b>{channel.ingestLag != null ? channel.ingestLag+"s" : "—"}</b></div>

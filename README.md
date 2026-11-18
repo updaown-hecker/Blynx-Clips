@@ -41,6 +41,16 @@ The Linux container shares the host network and the app listens on port 17866 on
 
 Automatic storage reclamation is optional. Set `BLYNX_SERVER_PRUNE=1` in `server.env` before starting the service to remove the oldest unreviewed, non-favorite automatic clips when near the configured storage limit. Manual, reviewed, favorite and exported clips are kept. If protected clips fill the budget, recording pauses until you free space or raise the limit.
 
+### Anonymous Twitch vertical clips
+
+Only use this mode for a streamer who has given you permission to record and clip their channel. Set `BLYNX_TWITCH_CLIP_CHANNEL=theirname` in `server.env`, then run `docker compose --env-file server.env up -d --build`. The value is the Twitch username, with no URL. This pins capture to that channel and starts monitoring when first configured. Saved channels remain in the dashboard. Remove the variable and recreate the service to resume the previous multi-channel mode.
+
+Streamlink checks the public stream and starts capture with the earliest segments it can read from the current live playlist. An exact first-frame start depends on what Twitch still serves when Streamlink connects. Chat uses a read-only `justinfan` connection over TLS IRC WebSocket. This path uses no Twitch login, Client ID, or token. Twitch documents an OAuth-based IRC flow, so availability of the guest connection is outside the app's control.
+
+The clipper counts complete 10-second chat windows. After three baseline windows, it captures a highlight when a window has strictly more than triple the mean of up to 30 preceding windows. It targets 15 seconds before and after the center of the spike, up to 30 seconds total. The finished 720×1280 MP4 uses a center crop, carries a visible Twitch handle and source link in the library, and has locally generated Whisper captions when transcription succeeds. The first clip downloads the Whisper base model into the existing data volume. If Whisper cannot transcribe, the app keeps the credited MP4 and reports the issue. A clip made when less footage is in the rolling buffer can be shorter.
+
+For upgrades, pull the new source and run `docker compose --env-file server.env up -d --build` from the same directory. Compose keeps the existing `blynx-data` volume, where the clip files and catalog live by default. Leave `BLYNX_SERVER_PRUNE=0` to keep automatic cleanup disabled.
+
 ### Forward the dashboard through Cloudflare Tunnel
 
 In `server.env`, set `BLYNX_PUBLIC_ORIGIN=https://clips.blynx.vip` (or your chosen HTTPS hostname). Apply it with `docker compose --env-file server.env up -d`.

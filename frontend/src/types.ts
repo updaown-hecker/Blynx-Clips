@@ -3,7 +3,7 @@ export type Channel = {
   id: string; name: string; platform: "Twitch" | "YouTube" | "Simulation"; avatar: string; url: string
   enabled: number; priority: number; offset: number; preset: string; samples: Sample[]
   discovery?: string; recording?: string; chat?: string; error?: string; health?: number; bitrate?: number
-  mps?: number; raw5?: number; raw15?: number; raw30?: number; score?: number; baseline?: number; unique5?: number
+  mps?: number; chatWindow?: 5|10; raw5?: number; raw10?: number; raw15?: number; raw30?: number; score?: number; baseline?: number; unique5?: number
   comparedWindows?: number; similarWindows?: number
   ingestLag?: number | null; acceleration?: number; repeats?: number; emotes?: number; provisional?: boolean
   live?: {broadcast?: string; title: string; thumbnail?: string; viewers?: number | null}

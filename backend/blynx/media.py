@@ -3,10 +3,13 @@ import csv
 import json
 import os
 import signal
+import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .captions import write_ass
 from .detector import Event
 
 
@@ -23,9 +26,10 @@ def bounds(event: Event, pre: float, post: float, maximum: float, offset: float)
     return start, min(start + maximum - 0.25, end)
 
 
-async def run(*args: str, timeout: float = 180) -> bytes:
+async def run(*args: str, timeout: float = 180, cwd: Path | None = None,
+              accepted_codes: tuple[int, ...] = (0,)) -> bytes:
     proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
-                                                stderr=asyncio.subprocess.PIPE)
+                                                stderr=asyncio.subprocess.PIPE, cwd=cwd)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except BaseException:
@@ -33,7 +37,7 @@ async def run(*args: str, timeout: float = 180) -> bytes:
             proc.kill()
         await proc.wait()
         raise
-    if proc.returncode:
+    if proc.returncode not in accepted_codes:
         raise RuntimeError(f"{args[0]} failed ({proc.returncode}): {err.decode(errors='replace')[-500:]}")
     return out
 
@@ -53,11 +57,13 @@ async def halt(proc: asyncio.subprocess.Process | None, grace: float = 4) -> Non
 
 
 class Recorder:
-    def __init__(self, directory: Path, url: str, quality: str, simulated: bool = False) -> None:
+    def __init__(self, directory: Path, url: str, quality: str, simulated: bool = False,
+                 earliest_live: bool = False) -> None:
         self.directory = directory
         self.url = url
         self.quality = quality
         self.simulated = simulated
+        self.earliest_live = earliest_live
         self.producer: asyncio.subprocess.Process | None = None
         self.consumer: asyncio.subprocess.Process | None = None
         self.segments: list[Segment] = []
@@ -89,6 +95,7 @@ class Recorder:
         try:
             self.producer = await asyncio.create_subprocess_exec(
                 "streamlink", "--stdout", "--loglevel", "error", "--stream-segment-timeout", "15",
+                *(("--hls-live-restart",) if self.earliest_live else ()),
                 self.url, f"{self.quality},best" if self.quality.endswith("p") else self.quality,
                 stdout=write_fd, stderr=self.log)
             self.consumer = await asyncio.create_subprocess_exec(
@@ -147,7 +154,8 @@ class Recorder:
 
 
 async def assemble(segments: list[Segment], start: float, end: float, target: Path,
-                   maximum: float, nvenc: bool = False) -> dict:
+                   maximum: float, nvenc: bool = False, *, credit: str = "",
+                   model_cache: Path | None = None) -> dict:
     selected = [item for item in segments if item.end > start and item.start < end]
     if not selected:
         raise RuntimeError("No completed video overlaps this event")
@@ -160,19 +168,43 @@ async def assemble(segments: list[Segment], start: float, end: float, target: Pa
     manifest = selected[0].path.parent / f"{target.stem}.concat"
     manifest.write_text("".join(f"file '{item.path.name}'\n" for item in selected))
     try:
-        arguments = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "1",
-                     "-i", str(manifest), "-ss", f"{earliest - selected[0].start:.3f}",
-                     "-t", f"{min(latest - earliest, maximum - 0.25):.3f}",
-                     "-map", "0:v:0", "-map", "0:a:0", "-pix_fmt", "yuv420p"]
+        duration = min(latest - earliest, maximum - 0.25)
+        seek = f"{earliest - selected[0].start:.3f}"
+        source = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "1",
+                  "-i", str(manifest.absolute())]
+        limit = ["-t", f"{duration:.3f}"]
+        arguments = source + ["-ss", seek] + limit
         encoding = ["-c:v", "libx264", "-preset", "veryfast", "-threads", "2", "-crf", "20"]
-        output = ["-c:a", "aac", "-movflags", "+faststart", str(temporary)]
-        if nvenc:
-            try:
-                await run(*arguments, "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20", *output)
-            except RuntimeError:
-                await run(*arguments, *encoding, *output)
-        else:
-            await run(*arguments, *encoding, *output)
+        output = ["-c:a", "aac", "-movflags", "+faststart", str(temporary.absolute())]
+        caption_failed = False
+        with tempfile.TemporaryDirectory(prefix="blynx-caption-") as work:
+            location = Path(work)
+            tracks = ["-map", "0:v:0", "-map", "0:a:0", "-pix_fmt", "yuv420p"]
+            video = arguments + tracks
+            if credit:
+                transcript = []
+                if model_cache is not None:
+                    audio = location / "audio.wav"
+                    try:
+                        await run(*arguments, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(audio))
+                        transcript = json.loads(await run(sys.executable, "-m", "blynx.captions",
+                                                          str(audio), str(model_cache.absolute()), timeout=300))
+                    except (OSError, RuntimeError, TimeoutError, ValueError):
+                        caption_failed = True
+                write_ass(location / "captions.ass", credit, duration, transcript)
+                video = source + limit + tracks + [
+                    "-vf", f"trim=start={seek},setpts=PTS-STARTPTS,"
+                    "scale=720:1280:force_original_aspect_ratio=increase:force_divisible_by=2,"
+                    "crop=720:1280,setsar=1,ass=captions.ass",
+                    "-af", f"atrim=start={seek},asetpts=PTS-STARTPTS",
+                ]
+            if nvenc:
+                try:
+                    await run(*video, "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20", *output, cwd=location)
+                except RuntimeError:
+                    await run(*video, *encoding, *output, cwd=location)
+            else:
+                await run(*video, *encoding, *output, cwd=location)
         info = json.loads(await run("ffprobe", "-v", "error", "-show_streams", "-show_format",
                                     "-of", "json", str(temporary), timeout=15))
         duration = float(info["format"]["duration"])
@@ -188,7 +220,8 @@ async def assemble(segments: list[Segment], start: float, end: float, target: Pa
         except RuntimeError:
             thumbnail.unlink(missing_ok=True)
         return {"duration": duration, "bytes": target.stat().st_size,
-                "partial": earliest - start > 1 or end - latest > 1, "thumbnail": thumbnail.exists()}
+                "partial": earliest - start > 1 or end - latest > 1, "thumbnail": thumbnail.exists(),
+                "caption_failed": caption_failed}
     finally:
         manifest.unlink(missing_ok=True)
         temporary.unlink(missing_ok=True)

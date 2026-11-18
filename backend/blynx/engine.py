@@ -14,9 +14,11 @@ from uuid import uuid4
 import httpx
 import psutil
 
-from .detector import Aggregator, Detection, Detector, Event
+from .anonymous_twitch import AnonymousTwitch
+from .detector import Aggregator, Bucket, Detection, Detector, Event
 from .media import Recorder, assemble, bounds, run
 from .platforms import Live, PlatformError, Twitch, YouTube, parse_url, read_secret
+from .spikes import WindowDetector
 from .store import Settings, Store
 
 log = logging.getLogger("blynx")
@@ -68,11 +70,24 @@ class Engine:
         self.samples: dict[str, deque] = {}
         self.scan: asyncio.Task | None = None
         self.follow_url = os.getenv("BLYNX_FOLLOW_URL", "").strip()
+        twitch_channel = os.getenv("BLYNX_TWITCH_CLIP_CHANNEL", "").strip().lower()
+        self.anonymous_twitch: AnonymousTwitch | None = None
+        if twitch_channel:
+            if not re.fullmatch(r"[a-z0-9_]{1,25}", twitch_channel):
+                raise PlatformError("BLYNX_TWITCH_CLIP_CHANNEL must be the permitted channel's Twitch username")
+            self.anonymous_twitch = AnonymousTwitch(twitch_channel)
+            self.follow_url = self.anonymous_twitch.url
         if self.follow_url:
             source = parse_url(self.follow_url)
             if source.kind == "video":
                 raise PlatformError("BLYNX_FOLLOW_URL needs a channel link for recurring broadcasts")
             self.follow_url = source.url
+        if store.config("twitch_clip_channel", "") != twitch_channel:
+            store.set("twitch_clip_channel", twitch_channel)
+            if self.anonymous_twitch:
+                store.execute("UPDATE channel SET enabled=1 WHERE url=?", (self.follow_url,))
+                self.running = True
+                store.set("running", True)
         self.follow_due = 0.0
         self.prune_enabled = os.getenv("BLYNX_SERVER_PRUNE") == "1"
         self.prune_due = 0.0
@@ -131,9 +146,22 @@ class Engine:
     async def add(self, url: str) -> dict:
         source = parse_url(url)
         if self.follow_url and source.url != self.follow_url:
-            raise PlatformError("This server follows the channel configured in BLYNX_FOLLOW_URL")
-        adapter = self.twitch if source.platform == "Twitch" else self.youtube
-        remote, name, avatar = await adapter.resolve(source)
+            variable = "BLYNX_TWITCH_CLIP_CHANNEL" if self.anonymous_twitch else "BLYNX_FOLLOW_URL"
+            raise PlatformError(f"This server follows the channel configured in {variable}")
+        if self.anonymous_twitch:
+            existing = self.store.item("SELECT * FROM channel WHERE url=? ORDER BY remote LIKE 'anon:%' LIMIT 1",
+                                       (source.url,))
+            if existing:
+                return existing
+            remote, name, avatar = "anon:" + source.key, source.key, ""
+        else:
+            adapter = self.twitch if source.platform == "Twitch" else self.youtube
+            remote, name, avatar = await adapter.resolve(source)
+            if source.platform == "Twitch":
+                self.store.execute("""
+                    UPDATE channel SET remote=?,name=?,avatar=? WHERE url=? AND remote LIKE 'anon:%'
+                    AND NOT EXISTS (SELECT 1 FROM channel WHERE platform='Twitch' AND remote=? AND video='')
+                """, (remote, name, avatar, source.url, remote))
         video = source.key if source.platform == "YouTube" and source.kind == "video" else ""
         key = uuid4().hex
         self.store.execute("INSERT OR IGNORE INTO channel(id,platform,remote,url,name,avatar,video) VALUES(?,?,?,?,?,?,?)",
@@ -146,14 +174,31 @@ class Engine:
         now = time.monotonic()
         twitch = [c for c in channels if c["platform"] == "Twitch"]
         if twitch and now >= self.discovery_due:
-            self.discovery_due = now + 45
-            try:
-                live = await self.twitch.live([c["remote"] for c in twitch])
-                for c in twitch:
-                    self.update_discovery(c, live.get(c["remote"]), "Offline")
-            except Exception as exc:
-                for c in twitch:
-                    self.status.setdefault(c["id"], {})["discovery"] = public_error(exc)
+            self.discovery_due = now + (5 if self.anonymous_twitch else 45)
+            if self.anonymous_twitch:
+                channel = twitch[0]
+                try:
+                    live = await self.anonymous_twitch.probe(self.live.get(channel["id"]))
+                    self.update_discovery(channel, live, "Offline")
+                except Exception as exc:
+                    self.status.setdefault(channel["id"], {})["discovery"] = public_error(exc)
+            else:
+                resolved = []
+                for channel in twitch:
+                    try:
+                        if channel["remote"].startswith("anon:"):
+                            channel = await self.add(channel["url"])
+                        resolved.append(channel)
+                    except Exception as exc:
+                        self.status.setdefault(channel["id"], {})["discovery"] = public_error(exc)
+                try:
+                    if resolved:
+                        live = await self.twitch.live([channel["remote"] for channel in resolved])
+                        for channel in resolved:
+                            self.update_discovery(channel, live.get(channel["remote"]), "Offline")
+                except Exception as exc:
+                    for channel in resolved:
+                        self.status.setdefault(channel["id"], {})["discovery"] = public_error(exc)
         youtube = [c for c in channels if c["platform"] == "YouTube"]
         search_count = sum(not c["video"] for c in youtube)
         searched = False
@@ -241,8 +286,13 @@ class Engine:
         try:
             start, end = bounds(job.event, data["pre"], data["post"], data["maximum"], data["offset"])
             async with self.encode:
+                credit = data.get("credit", "")
                 result = await assemble(list(recorder.segments), start, end, job.target,
-                                        data["maximum"], data.get("nvenc", False))
+                                        data["maximum"], data.get("nvenc", False),
+                                        credit=credit, model_cache=self.store.root / "whisper" if credit else None)
+            if result.get("caption_failed"):
+                job.event.reason += " · Whisper unavailable; saved with channel credit"
+                self.activity("Whisper could not add captions to a Twitch highlight", "warning")
             self.ready(job.id, job.event, result)
         except Exception as exc:
             reason = str(exc) if isinstance(exc, RuntimeError) else public_error(exc)
@@ -285,6 +335,8 @@ class Engine:
             channels = self.store.all("SELECT * FROM channel WHERE enabled=1 ORDER BY priority DESC, name")
             if self.follow_url:
                 channels = [c for c in channels if c["url"] == self.follow_url]
+            if self.anonymous_twitch:
+                channels = channels[:1]
             if self.running and (self.scan is None or self.scan.done()):
                 if channels:
                     self.scan = asyncio.create_task(self.discover(channels))
@@ -359,16 +411,21 @@ class Engine:
         key = channel["id"]
         mock = key == self.demo_id
         work = uuid4().hex
-        recorder = Recorder(self.buffer / work, live.url, settings.quality, mock)
+        anonymous = self.anonymous_twitch if not mock and channel["url"] == self.follow_url else None
+        recorder = Recorder(self.buffer / work, live.url, settings.quality, mock,
+                            earliest_live=anonymous is not None)
         data = self.status.setdefault(key, {})
         data.pop("error", None)
-        data.update({"recording": "Starting recorder", "chat": "Connecting", "discovery": "Live"})
+        data.update({"recording": "Starting recorder", "chat": "Connecting", "discovery": "Live",
+                     "chatWindow": 10 if anonymous else 5})
         offset = channel["offset"]
         pre, post, maximum = (6, 6, 35) if mock else (settings.pre, settings.post, settings.maximum)
+        if anonymous:
+            pre, post, maximum = 15, 15, 30.25
         preset = channel["preset"] or settings.preset
         rise, spread = {"High": (1.7, 3.5), "Balanced": (2.5, 5), "Low": (3.5, 7),
                         "Manual": (settings.rise, settings.deviations)}[preset]
-        detector = Detector(Detection(rise=rise, deviations=spread, baseline=settings.baseline,
+        detector = WindowDetector() if anonymous else Detector(Detection(rise=rise, deviations=spread, baseline=settings.baseline,
                                       min_users=settings.min_users, onset=settings.onset, cooldown=settings.cooldown,
                                       per_hour=settings.per_hour, max_active=maximum - pre - post - 0.5))
         pending: dict[int, Aggregator] = {}
@@ -404,7 +461,8 @@ class Engine:
         def journal(job: Job) -> dict:
             pre, post, maximum, offset = job.timing or timing
             return {"buffer": str(recorder.directory), "anchor": recorder.anchor, "settled": job.event.settled,
-                    "pre": pre, "post": post, "maximum": maximum, "offset": offset, "nvenc": settings.nvenc}
+                    "pre": pre, "post": post, "maximum": maximum, "offset": offset, "nvenc": settings.nvenc,
+                    "credit": anonymous.channel if anonymous else ""}
 
         timing = pre, post, maximum, offset
         last_manual = 0.0
@@ -446,7 +504,7 @@ class Engine:
             if mock:
                 setchat("Simulation connected")
             else:
-                adapter = self.twitch if channel["platform"] == "Twitch" else self.youtube
+                adapter = anonymous or (self.twitch if channel["platform"] == "Twitch" else self.youtube)
                 chat_task = asyncio.create_task(self.listen(adapter, live, message, setchat))
             demo_index = 0
             while True:
@@ -472,10 +530,11 @@ class Engine:
                     demo_index += 1
                 raw.append(bucket.count)
                 covered = data["chat"].endswith(" connected")
-                result = detector.tick(when, bucket.bucket() if covered else None)
+                sample_bucket = (Bucket(bucket.count, set()) if anonymous else bucket.bucket()) if covered else None
+                result = detector.tick(when, sample_bucket)
                 health = min(settings.buffer, max(0.0, recorder.segments[-1].end - recorder.segments[0].start)) if recorder.segments else 0
                 size = sum(item.path.stat().st_size for item in recorder.segments)
-                for field in ("score", "baseline", "provisional", "unique5", "comparedWindows", "similarWindows"):
+                for field in ("score", "baseline", "provisional", "unique5", "comparedWindows", "similarWindows", "raw10"):
                     if field not in detector.metrics:
                         data.pop(field, None)
                 data.update({"recording": "Recording" if recorder.segments else "Buffering",
@@ -485,7 +544,7 @@ class Engine:
                              "bufferBytes": size, "bitrate": round(size * 8 / health) if health else 0,
                              "ingestLag": round(bucket.delay_total / bucket.delay_samples, 2) if bucket.delay_samples else None,
                              **detector.metrics})
-                sample = {"at": when, "messages": data["raw5"], "baseline": data.get("baseline", 0),
+                sample = {"at": when, "messages": data.get("raw10", 0) if anonymous else data["raw5"], "baseline": data.get("baseline", 0),
                           "active": detector.active is not None}
                 if result and result[0] == "start":
                     event = result[1]
@@ -501,7 +560,7 @@ class Engine:
                         status,path,provisional,simulated,journal,score_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,2)""",
                         (clipid, channel["name"], name, channel["platform"], live.broadcast, live.url, event.onset,
                          event.peak, offset, "capturing", str(target), event.provisional, mock, json.dumps(journal(active))))
-                    self.activity(f'{channel["name"]} · chat spike detected')
+                    self.activity(f'{channel["name"]} · {event.reason or "chat spike detected"}')
                     sample["event"] = clipid
                 elif result and result[0] == "end" and active:
                     self.store.execute("UPDATE clip SET journal=?,score=? WHERE id=?",
@@ -539,8 +598,9 @@ class Engine:
                 await asyncio.gather(chat_task, return_exceptions=True)
             await recorder.stop()
             if active:
-                active.event.settled = time.time()
-                active.event.reason = "video recording interrupted"
+                if active.event.settled is None:
+                    active.event.settled = time.time()
+                    active.event.reason = "video recording interrupted"
                 jobs.append(active)
             for job in jobs:
                 if job.task is None:
@@ -576,7 +636,7 @@ class Engine:
                                 FROM clip ORDER BY onset DESC LIMIT 500""")
         return {"channels": channels, "clips": clips, "activities": list(self.activities), "running": self.running,
                 "demo": self.demo, "settings": self.store.settings.model_dump(), "system": self.system,
-                "integration": {"twitchConfigured": bool(self.twitch.client_id), "twitchAuth": self.auth_state,
+                "integration": {"twitchConfigured": bool(self.twitch.client_id), "twitchAuth": ("Using anonymous Twitch chat" if self.anonymous_twitch else self.auth_state),
                                 "twitchClientId": self.twitch.client_id, "youtubeAuth": self.youtube_auth,
                                 "youtubeConfigured": bool(self.youtube.api_key or self.youtube.oauth_token)}}
 
