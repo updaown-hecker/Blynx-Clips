@@ -43,6 +43,7 @@ SESSION = secrets.token_urlsafe(32)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     store = Store.default()
+    store.import_cut_clips()
     handler = RotatingFileHandler(store.root / "blynx.log", maxBytes=2_000_000, backupCount=3)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger = logging.getLogger("blynx")
@@ -541,6 +542,23 @@ class Export(BaseModel):
         return self
 
 
+@app.get("/api/cut-clips")
+async def cut_clips():
+    rows = app.state.engine.store.all("SELECT * FROM cut_clip ORDER BY created DESC, id")
+    return [{key: value for key, value in row.items() if key != "path"}
+            for row in rows if Path(row["path"]).is_file()]
+
+
+@app.get("/media/cut-clips/{key}/download")
+async def download_cut_clip(key: str):
+    row = app.state.engine.store.item("SELECT path FROM cut_clip WHERE id=?", (key,))
+    if row:
+        path = Path(row["path"])
+        if path.is_file():
+            return FileResponse(path, media_type="video/mp4", filename=path.name)
+    raise HTTPException(404, "Cut clip is unavailable")
+
+
 @app.post("/api/clips/{key}/export")
 async def export_clip(key: str, body: Export):
     original = clip(key)
@@ -553,22 +571,36 @@ async def export_clip(key: str, body: Export):
         raise HTTPException(422, "Trim range exceeds clip duration")
     folder = engine.store.clips_dir() / "exports"
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"{source.stem}_{body.preset}_{secrets.token_hex(3)}.mp4"
+    cut_id = secrets.token_hex(16)
+    target = folder / f"{source.stem}_{body.preset}_{cut_id}.mp4"
     temp = target.with_suffix(".partial.mp4")
     args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
-            "-ss", str(body.start), "-t", str(end - body.start), "-map", "0:v:0", "-map", "0:a:0"]
+            "-ss", str(body.start), "-t", str(end - body.start), "-map", "0:v:0", "-map", "0:a:0?"]
     if body.preset == "vertical":
         args += ["-vf", "crop='min(iw,ih*9/16)':'min(ih,iw*16/9)',scale=1080:1920:flags=lanczos,setsar=1"]
     try:
         async with engine.encode:
             await run(*args, "-c:v", "libx264", "-preset", "veryfast", "-threads", "2", "-c:a", "aac",
                       "-movflags", "+faststart", str(temp))
+        size = temp.stat().st_size
+        if not size:
+            raise RuntimeError("FFmpeg produced an empty export")
         temp.replace(target)
+        try:
+            with engine.store.db:
+                engine.store.db.execute("INSERT INTO cut_clip VALUES(?,?,?,?,?,?,?,?)",
+                                        (cut_id, str(target), original["name"], original["channel"],
+                                         body.preset, time.time(), end - body.start, size))
+                engine.store.db.execute("UPDATE clip SET review='Exported' WHERE id=?", (key,))
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
     except Exception:
+        logging.getLogger("blynx").exception("Could not save cut clip")
+        raise HTTPException(500, "Could not save cut clip") from None
+    finally:
         temp.unlink(missing_ok=True)
-        raise HTTPException(500, "FFmpeg export failed") from None
-    engine.store.execute("UPDATE clip SET review='Exported' WHERE id=?", (key,))
-    return {"path": str(target)}
+    return {"id": cut_id, "path": str(target)}
 
 
 @app.post("/api/clips/{key}/location")

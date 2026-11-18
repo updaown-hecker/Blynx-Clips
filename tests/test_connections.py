@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import httpx
@@ -101,3 +102,57 @@ def test_authenticated_tab_upload_creates_mp4(local, tmp_path):
     assert response.json()["duration"] >= 1.9
     assert local.get(f"/media/{key}/video", headers={"range": "bytes=0-511"}).status_code == 206
     assert local.get(f"/media/{key}/thumbnail").status_code == 200
+
+
+def test_cut_clips_recover_older_exports_and_keep_new_downloads(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLYNX_DATA_DIR", str(tmp_path))
+    folder = tmp_path / "clips"
+    exports = folder / "exports"
+    exports.mkdir(parents=True)
+    source = folder / "highlight.mp4"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=12",
+        "-t", "4", "-c:v", "libx264", "-threads", "2", str(source)
+    ], check=True)
+    legacy = exports / "highlight_original_abcdef.mp4"
+    legacy.write_bytes(source.read_bytes())
+    (exports / "highlight_vertical_012345.partial.mp4").write_bytes(b"unfinished")
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        assert client.get("/api/cut-clips").status_code == 401
+        assert client.get("/").status_code == 200
+        cuts = client.get("/api/cut-clips").json()
+        assert len(cuts) == 1
+        legacy_download = client.get(f"/media/cut-clips/{cuts[0]['id']}/download")
+        assert legacy_download.content == legacy.read_bytes()
+
+        client.portal.call(app.state.engine.store.execute, """
+            INSERT INTO clip(id,channel,name,platform,broadcast,source,onset,score,offset,status,path,duration)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("original", "Streamer", "Highlight title", "Twitch", "live", "", 1, 0, 0, "ready", str(source), 4))
+        export = client.post("/api/clips/original/export", headers=DASHBOARD,
+                             json={"start": 1, "end": 3, "preset": "vertical"})
+        assert export.status_code == 200, export.text
+        cut_id = export.json()["id"]
+        cut = client.get("/api/cut-clips").json()[0]
+        assert (cut["id"], cut["name"], cut["channel"], cut["preset"], cut["duration"]) == (
+            cut_id, "Highlight title", "Streamer", "vertical", 2)
+        assert "path" not in cut
+        assert client.get("/media/original/download").content == legacy.read_bytes()
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        client.get("/")
+        assert len(client.get("/api/cut-clips").json()) == 2
+        download = client.get(f"/media/cut-clips/{cut_id}/download")
+        assert download.status_code == 200
+        assert download.headers["content-type"] == "video/mp4"
+        assert download.headers["content-disposition"].startswith("attachment;")
+        assert download.content != legacy.read_bytes()
+        assert len(download.content) == cut["bytes"]
+        probe = subprocess.run([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,duration", "-of", "json", "-i", "pipe:0"
+        ], input=download.content, capture_output=True, check=True)
+        stream = json.loads(probe.stdout)["streams"][0]
+        assert (stream["width"], stream["height"], float(stream["duration"])) == (1080, 1920, 2)
+        assert client.get("/media/cut-clips/missing/download").status_code == 404

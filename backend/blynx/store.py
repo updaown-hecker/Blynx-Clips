@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -75,6 +77,11 @@ class Store:
               id TEXT PRIMARY KEY, channel TEXT NOT NULL, platform TEXT NOT NULL, started REAL NOT NULL,
               ended REAL NOT NULL, outcome TEXT NOT NULL, simulated INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS cut_clip (
+              id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+              channel TEXT NOT NULL, preset TEXT NOT NULL, created REAL NOT NULL,
+              duration REAL, bytes INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS quota (
               day TEXT NOT NULL, bucket TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(day,bucket)
             );
@@ -88,6 +95,34 @@ class Store:
         self.started = bool(self.config("running", True))
         self.db.execute("UPDATE session SET outcome='interrupted' WHERE outcome='active'")
         self.db.commit()
+
+    def import_cut_clips(self) -> None:
+        originals = {Path(row["path"]): row for row in self.all(
+            "SELECT path,name,channel FROM clip WHERE path<>''")}
+        directories = {self.root / "clips", self.clips_dir(), *(path.parent for path in originals)}
+        known = {Path(row["path"]) for row in self.all("SELECT path FROM cut_clip")}
+        recovered = []
+        for directory in directories:
+            for path in (directory / "exports").glob("*.mp4"):
+                match = re.fullmatch(r"(.+)_(original|vertical)_(?:[a-f0-9]{6}|[a-f0-9]{32})\.mp4", path.name)
+                if not match or path in known:
+                    continue
+                try:
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    info = path.stat()
+                except OSError:
+                    continue
+                if not info.st_size:
+                    continue
+                stem, preset = match.groups()
+                original = originals.get(directory / f"{stem}.mp4")
+                recovered.append((sha256(os.fsencode(path)).hexdigest(), str(path),
+                                  original["name"] if original else stem,
+                                  original["channel"] if original else "", preset,
+                                  info.st_mtime, None, info.st_size))
+        with self.db:
+            self.db.executemany("INSERT OR IGNORE INTO cut_clip VALUES(?,?,?,?,?,?,?,?)", recovered)
 
     def config(self, key: str, default):
         row = self.db.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()

@@ -13,6 +13,10 @@ export type Clip = {
   status: "ready" | "capturing" | "processing" | "failed"; review: string; favorite: number
   partial: number; duration: number; thumbnail: number; simulated: number; reason: string; offset: number
 }
+export type CutClip = {
+  id: string; name: string; channel: string; preset: "original" | "vertical"
+  created: number; duration: number | null; bytes: number
+}
 export type Settings = {
   slots: number; pre: number; post: number; maximum: number; buffer: number; quality: string
   preset: string; rise: number; deviations: number; baseline: number; onset: number; cooldown: number

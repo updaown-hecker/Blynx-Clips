@@ -6,15 +6,15 @@ import {
   Activity, ArrowDownToLine, ArrowRight, AudioLines, BarChart3, Bell, CircleHelp,
   Clapperboard, Clock3, Cpu, ExternalLink, FlaskConical, FolderOpen, HardDrive, LayoutDashboard,
   LayoutGrid, Link2, List, Monitor, Play, Plus, Puzzle, Radio, RefreshCw, Search, Settings2, Square,
-  Star, Trash2, Twitch, Users, Video, Wifi, X, Youtube, Zap
+  Scissors, Star, Trash2, Twitch, Users, Video, Wifi, X, Youtube, Zap
 } from "lucide-react"
 import { Button } from "./button"
-import { api, type Analytics, type Channel, type Clip, type Settings, type State } from "./types"
+import { api, type Analytics, type Channel, type Clip, type CutClip, type Settings, type State } from "./types"
 import "./style.css"
 
 const pages = [
   {name:"Dashboard", icon:LayoutDashboard}, {name:"Streamers",icon:Users}, {name:"Live Monitoring",icon:Radio},
-  {name:"Highlights",icon:Clapperboard}, {name:"Analytics",icon:BarChart3},
+  {name:"Highlights",icon:Clapperboard}, {name:"Cut Clips",icon:Scissors}, {name:"Analytics",icon:BarChart3},
   {name:"Chrome Extension",icon:Puzzle}, {name:"Settings",icon:Settings2},
 ] as const
 type Page = typeof pages[number]["name"]
@@ -152,7 +152,47 @@ function ClipLibrary({clips, open}: {clips:Clip[]; open:(id:string)=>void}) {
     <p>{clips.length?"Change your search or filters to see more.":"Clips appear as soon as FFmpeg finishes processing them."}</p></Empty>}</>
 }
 
-function ClipDetail({clip, close, task}: {clip:Clip;close:()=>void;task:Task}) {
+function CutDownload({id}: {id:string}) {
+  return <Button asChild><a href={`/media/cut-clips/${id}/download`} download>
+    <ArrowDownToLine size={15}/>Download MP4
+  </a></Button>
+}
+
+function CutClips({openHighlights}: {openHighlights:()=>void}) {
+  const [cuts,setCuts]=useState<CutClip[]>()
+  const [error,setError]=useState("")
+  const [attempt,retry]=useState(0)
+  useEffect(()=>{
+    let active=true
+    api<CutClip[]>("cut-clips").then(result=>{
+      if(active) setCuts(result)
+    }).catch(error=>{
+      if(active) setError(error.message)
+    })
+    return ()=>{active=false}
+  },[attempt])
+  if(error) return <Empty icon={<Scissors/>} title="Could not load cut clips">
+    <p>{error}</p>
+    <Button onClick={()=>{setError("");retry(attempt+1)}}>Try again</Button>
+  </Empty>
+  if(!cuts) return <p role="status" className="secondary">Loading cut clips…</p>
+  if(!cuts.length) return <Empty icon={<Scissors/>} title="No cut clips yet">
+    <p>Open a highlight, set a trim range, then choose Save cut clip.</p>
+    <Button onClick={openHighlights}>Open Highlights <ArrowRight size={14}/></Button>
+  </Empty>
+  return <section className="panel" aria-label="Saved cut clips">{cuts.map(cut=>
+    <div key={cut.id} className="channel-row">
+      <span className="avatar"><Scissors size={17}/></span>
+      <div className="grow"><div className="truncate" title={cut.name}><strong>{cut.name}</strong></div>
+        <p className="secondary">{[cut.channel, cut.preset==="vertical"?"Vertical 9:16":"Original aspect",
+          cut.duration===null?"":number.format(cut.duration)+"s", size(cut.bytes), date(cut.created)].filter(Boolean).join(" · ")}</p>
+      </div>
+      <CutDownload id={cut.id}/>
+    </div>
+  )}</section>
+}
+
+function ClipDetail({clip, close, task, openCuts}: {clip:Clip;close:()=>void;task:Task;openCuts:()=>void}) {
   const [name,setName]=useState(clip.name)
   const [start,setStart]=useState("0")
   const [end,setEnd]=useState("")
@@ -176,15 +216,22 @@ function ClipDetail({clip, close, task}: {clip:Clip;close:()=>void;task:Task}) {
       <Button asChild><a href={"/media/"+clip.id+"/download"}><ArrowDownToLine size={15}/>Download MP4</a></Button>
       <Button onClick={()=>task(()=>api("clips/"+clip.id+"/location","POST"))}><FolderOpen size={15}/>Open folder</Button>
       {clip.source&&<Button onClick={()=>task(()=>navigator.clipboard.writeText(clip.source),"Source link copied")}><Link2 size={15}/>Copy source</Button>}
-    </div><div className="export-box"><h3>Export for editing</h3><div className="toolbar"><label>Trim start (s)<input type="number" min={0} max={clip.duration}
+    </div><div className="export-box"><h3>Trim clip</h3><div className="toolbar"><label>Trim start (s)<input type="number" min={0} max={clip.duration}
         step=".1" value={start} onChange={e=>setStart(e.target.value)}/></label>
       <label>Trim end (s)<input type="number" min={1} max={clip.duration} step=".1" value={end} placeholder={clip.duration.toFixed(1)} onChange={e=>setEnd(e.target.value)}/></label>
       <label>Format<select value={preset} onChange={e=>setPreset(e.target.value)}><option value="original">Original aspect</option><option value="vertical">1080×1920 center crop</option></select></label>
       <Button variant="primary" disabled={busy} onClick={()=>task(async()=>{
-        setBusy(true); try { const result=await api<{path:string}>("clips/"+clip.id+"/export","POST",{start:+start,end:end?+end:null,preset});setExported(result.path) }
+        setBusy(true)
+        try {
+          const result=await api<{id:string}>("clips/"+clip.id+"/export","POST",{start:+start,end:end?+end:null,preset})
+          setExported(result.id)
+        }
         finally {setBusy(false)}
-      },"Export complete")}>{busy?"Encoding…":"Export MP4"}</Button></div>
-      {exported&&<p className="secondary break">{exported}</p>}
+      },"Saved to Cut Clips")}>{busy?"Encoding…":"Save cut clip"}</Button></div>
+      {exported&&<div className="toolbar">
+        <CutDownload id={exported}/>
+        <Button variant="ghost" onClick={openCuts}>View Cut Clips <ArrowRight size={14}/></Button>
+      </div>}
     </div></>}
     {["ready","failed"].includes(clip.status)&&<Button variant="danger" onClick={()=>{
       if(confirm("Delete this highlight and its saved video?")) task(async()=>{await api("clips/"+clip.id,"DELETE"); close()},"Highlight deleted")
@@ -417,6 +464,7 @@ function App() {
   const captions:Record<Page,string>={
     "Dashboard":"", "Streamers":"Saved channels, capture priorities, and timing offsets.",
     "Live Monitoring":"Inspect live chat, detection, and video buffers.", "Highlights":"Review, trim, and export captured clips.",
+    "Cut Clips":"Download your finished edits.",
     "Analytics":"Monitoring sessions and clip history.", "Chrome Extension":"Add the current stream from Chrome.",
     "Settings":"Platform connections, capture preferences, and detection thresholds.",
   }
@@ -481,13 +529,15 @@ function App() {
         </section>:<Empty icon={<Users/>} title="No streamers saved"><p>Add a Twitch or YouTube channel URL.</p>
           <Button variant="primary" onClick={()=>setAdd(true)}><Plus size={16}/>Add streamer</Button></Empty>)}
         {page==="Highlights"&&<ClipLibrary clips={clips} open={openClip}/>}
+        {page==="Cut Clips"&&<CutClips openHighlights={()=>setPage("Highlights")}/>}
         {page==="Analytics"&&<AnalyticsView state={state}/>}
         {page==="Chrome Extension"&&<ExtensionView task={task}/>}
         {page==="Settings"&&<SettingsView key={JSON.stringify(state.settings)} state={state} task={task}/>}
       </motion.div>}
     </div></main>
     <AnimatePresence>{add&&<AddChannel close={()=>setAdd(false)} refresh={refresh} setup={()=>{setAdd(false);setPage("Settings")}}/>}
-      {selection&&<ClipDetail key={selection.id} clip={selection} close={()=>openClip(undefined)} task={task}/>}
+      {selection&&<ClipDetail key={selection.id} clip={selection} close={()=>openClip(undefined)} task={task}
+        openCuts={()=>{openClip(undefined);setPage("Cut Clips")}}/>}
       {toast&&<motion.div role="status" className={toast.error?"toast error":"toast"} initial={{opacity:0,y:12}}
         animate={{opacity:1,y:0}} exit={{opacity:0}}>{toast.error?<CircleHelp size={16}/>:<Activity size={16}/>} {toast.text}
         <Button variant="ghost" aria-label="Dismiss" onClick={()=>setToast(undefined)}><X size={15}/></Button></motion.div>}</AnimatePresence>
